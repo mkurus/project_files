@@ -1,0 +1,88 @@
+/*
+ * gsm_task.h
+ *
+ *  Created on: 27 Eki 2017
+ *      Author: mkurus
+ */
+
+#ifndef GSM_TASK_H_
+#define GSM_TASK_H_
+
+#ifndef LORA_TASK_H_
+#include "lora_task.h"
+#endif
+
+#define GSM_TASK_EVENT_QUE_SIZE                 5
+#define GSM_TASK_OFFLINE_EVENT_QUE_SIZE         2
+#define GSM_TASK_PARAM1_SIZE                    16
+#define GSM_TASK_PARAM2_SIZE                    64
+
+/* events processed by ignition task */
+typedef enum GSM_TASK_SIGNAL{
+	SIGNAL_GSM_TASK_SEND_SMS,
+	SIGNAL_GSM_TASK_DIAL,
+	SIGNAL_GSM_TASK_REGISTERED,
+	SIGNAL_GSM_TASK_DEREGISTERED,
+	SIGNAL_GSM_CONNECTED_SERVER,
+	SIGNAL_GSM_DISCONNECTED_SERVER,
+	SIGNAL_GSM_TASK_SEND_LORA_MESSAGE,
+	SIGNAL_GSM_TASK_XMIT_KEEPALIVE_MESSAGE
+}GSM_TASK_SIGNAL_T;
+
+typedef enum GSM_TASK_STATE{
+	GSM_TASK_STATE_NOT_REGISTERED,
+	GSM_TASK_STATE_REGISTERED,
+	GSM_TASK_STATE_CONNECTED_SERVER,
+	GSM_TASK_STATE_DISCONNECTED_SERVER
+}GSM_TASK_STATE_T;
+
+
+typedef union {
+	char  param1[GSM_TASK_PARAM1_SIZE];                             /*  phone number */
+	char  param2[GSM_TASK_PARAM2_SIZE];                             /*  SMS text */
+	char  loraMsgBuf[LORA_MAX_MSG_SIZE * LORA_MAX_MSG_PER_PACKET];   /* lora message buffer */
+}GSM_PARAM_BUFFER_T;
+
+/* event structure */
+typedef struct{
+	GSM_TASK_SIGNAL_T  sig;
+	GSM_PARAM_BUFFER_T param;
+}GSM_TASK_EVENT_T;
+
+/**
+ * Event queue for GSM connected state
+ */
+typedef struct {
+	uint8_t        u8_wrtPtr;
+	uint8_t        u8_readPtr;
+	uint8_t        u8_count;
+	GSM_TASK_EVENT_T    tEventBuffer[GSM_TASK_EVENT_QUE_SIZE];
+}GsmTaskEventQueue;    // circular event queue
+
+
+/**
+ * Event queue for GSM non-connected state
+ */
+typedef struct {
+	uint8_t        u8_wrtPtr;
+	uint8_t        u8_readPtr;
+	uint8_t        u8_count;
+	GSM_TASK_EVENT_T    tEventBuffer[GSM_TASK_EVENT_QUE_SIZE];
+}GsmTaskEventQueue_Offline;    // circular event queue
+
+/**
+ *
+ */
+typedef struct {
+	GSM_TASK_STATE_T tTaskState;
+	GsmTaskEventQueue tEventQueue;
+	GsmTaskEventQueue_Offline tEventQueue_Offline;
+}GsmTask;
+
+
+void PutEvent_GsmTask(GSM_TASK_EVENT_T *tEventContainer);
+void gsm_task_init();
+void task_gsm();
+
+
+#endif /* GSM_TASK_H_ */

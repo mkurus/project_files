@@ -1,0 +1,107 @@
+#include "chip.h"
+#include "board.h"
+#include "timer.h"
+#include "trace.h"
+#include "settings.h"
+#include "status.h"
+#include "io_ctrl.h"
+#include "messages.h"
+#include <string.h>
+
+#define TRACE_PORT       LPC_UART0
+/*****************************************************************/
+/* Pin muxing configuration */
+
+/* refer to section 8.5.1 Pin Function Select register 0 of UM1060
+ * to select IOCON_FUNC mode
+ * */
+static const PINMUX_GRP_T T2_TracePortMuxTable[] = {
+	{0,  2,   IOCON_MODE_PULLUP | IOCON_FUNC1},	/* TXD0 */
+	{0,  3,   IOCON_MODE_PULLUP | IOCON_FUNC1},	/* RXD0 */
+};
+
+/*****************************************************************/
+#define DEBUG_UART_SRB_SIZE         4096	                 /* Send ring buffer size */
+#define DEBUG_UART_RRB_SIZE         512	                     /* Receive ring buffer size */
+#define DEBUG_BAUD_RATE   		  115200
+#define DEBUG_UART_ISR_HANDLER 	    UART0_IRQHandler
+#define DEBUG_IRQ_SELECTION 	    UART0_IRQn
+
+static RINGBUFF_T debug_txring,debug_rxring;      /* Transmit and receive ring buffers */
+static uint8_t debug_rxbuff[DEBUG_UART_RRB_SIZE];
+static uint8_t debug_txbuff[DEBUG_UART_SRB_SIZE]; /* Transmit and receive buffers */
+
+/*****************************************************************/
+void debug_init()
+{
+	Chip_IOCON_SetPinMuxing(LPC_IOCON, T2_TracePortMuxTable, sizeof(T2_TracePortMuxTable) / sizeof(PINMUX_GRP_T));
+
+	Chip_UART_Init(TRACE_PORT);
+	Chip_UART_SetBaud(TRACE_PORT, DEBUG_BAUD_RATE );
+	Chip_UART_ConfigData(TRACE_PORT, UART_LCR_WLEN8 | UART_LCR_SBS_1BIT | UART_LCR_PARITY_DIS);
+
+	/* Enable UART Transmit */
+	Chip_UART_TXEnable(TRACE_PORT);
+	RingBuffer_Init(&debug_rxring, debug_rxbuff, 1, DEBUG_UART_RRB_SIZE);
+	RingBuffer_Init(&debug_txring, debug_txbuff, 1, DEBUG_UART_SRB_SIZE);
+
+	/* Reset and enable FIFOs, FIFO trigger level 3 (14 chars) */
+/*	Chip_UART_SetupFIFOS(TRACE_PORT, (UART_FCR_FIFO_EN | UART_FCR_RX_RS |
+						 UART_FCR_TX_RS | UART_FCR_TRG_LEV3));*/
+
+	/* Enable receive data and line status interrupt */
+	Chip_UART_IntEnable(TRACE_PORT, (UART_IER_RBRINT | UART_IER_RLSINT));
+
+	/* preemption = 1, sub-priority = 1 */
+	NVIC_SetPriority(DEBUG_IRQ_SELECTION, 1);
+	NVIC_EnableIRQ(DEBUG_IRQ_SELECTION);
+}
+/****************************************************************/
+__attribute__((short_call))
+void __attribute__ ((noinline)) UART0_IRQHandler(void)
+{
+	Chip_UART_IRQRBHandler(TRACE_PORT, &debug_rxring, &debug_txring);
+}
+/****************************************************************/
+void PRINT_K(char *msg)
+{
+	Chip_UART_SendRB(TRACE_PORT, &debug_txring, msg, strlen(msg));
+}
+void PRINT_G(char *msg)
+{
+
+	Chip_UART_SendRB(TRACE_PORT, &debug_txring, msg, strlen(msg));
+}
+void PRINT_GPS(char *msg)
+{
+	return;
+	Chip_UART_SendRB(TRACE_PORT, &debug_txring, msg, strlen(msg));
+}
+/******************************************************************/
+void DebugPortTask()
+{
+	COMMAND_RESULT_T result;
+	COMMAND_RESPONSE_T commandResponse;
+	BLOCKAGE_INFO_T blockage_info;
+	char  debugRxBuffer[DEBUG_UART_RRB_SIZE];
+
+	memset(debugRxBuffer, 0, DEBUG_UART_RRB_SIZE);
+	memset(&commandResponse, 0 ,sizeof(COMMAND_RESPONSE_T));
+
+	if(Get_UartLine(TRACE_PORT, &debug_rxring,  (uint8_t *)debugRxBuffer, DEBUG_UART_RRB_SIZE, '#', '!', 2)){
+		PRINT_K("\nDebug message received\n");
+		result = ProcessReceivedData(debugRxBuffer, &commandResponse, COMMAND_SOURCE_UART);
+		if(result == REPLY_ECHO_PACKET){
+			PRINT_K(commandResponse.buffer);
+		}
+		if(commandResponse.b_needToReset)
+			NVIC_SystemReset();
+	}
+	Get_BlockageInfo(&blockage_info);
+	if(blockage_info.blockageStatus== BLOCKAGE_ACTIVATED &&
+		blockage_info.cmdSource == COMMAND_SOURCE_UART){
+		PrepareBlockageEchoPacket(commandResponse.buffer);
+		PRINT_K(commandResponse.buffer);
+		Set_BlockageStatus(BLOCKAGE_NOT_EXIST);
+	}
+}

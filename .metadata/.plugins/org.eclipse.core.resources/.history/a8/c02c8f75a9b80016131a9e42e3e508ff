@@ -1,0 +1,231 @@
+
+#include "bsp.h"
+#include "board.h"
+#include "timer.h"
+#include "rf_node.h"
+#include "settings.h"
+#include "gsm.h"
+#include "gps.h"
+#include "adc.h"
+#include "can.h"
+#include "rf_task.h"
+#include "onewire.h"
+#include "MMA8652.h"
+#include "gSensor.h"
+#include "utils.h"
+#include "le50.h"
+#include "messages.h"
+#include "event.h"
+#include "trace.h"
+#include "status.h"
+#include <ctype.h>
+#include <string.h>
+#include <stdlib.h>
+
+
+/*************************************/
+bool le50_init()
+{
+	char buffer[128];
+
+	for( i =0; i < LE50_DETECT_RETRY_COUNT; i++){
+		 if(le50_activate_at_mode())
+			 PRINT_K("Switched to AT mode\n");
+		 else
+			 return false;
+	}
+	if(le50_set_operating_mode(LE50_MODE_ADDRESSED_SECURE))
+		PRINT_K("Addressed Secure Mode selected\n");
+	else
+		return false;
+
+	 if(le50_set_network_options(LE50_OPTS_NO_HEADER |
+			                    LE50_OPTS_AES |
+								LE50_OPTS_CR |
+								LE50_OPTS_RADIO_RSSI)){
+		PRINT_K("Network options set\n");
+	//	sprintf(buffer,"Network options %X",LE50_OPTS_NO_HEADER | LE50_OPTS_AES);
+	}
+
+	else
+		return false;
+
+	if(le50_set_low_power_mode(LE50_OPTS_LP_HW_PIN))
+		PRINT_K("Low power mode selected\n");
+	else
+		return false;
+
+	if(le50_set_aes_key(aes_key)){
+		PRINT_K("AES key set\n");
+
+	}
+	else
+		return false;
+
+	if(le50_activate_online_mode()){
+		PRINT_K("Online mode activated\n");
+		return true;
+	}
+
+	else{
+		PRINT_K("Cannot enter Online mode!!!\n");
+    	return false;
+	}
+
+
+}
+/*************************************/
+bool le50_get_serial_number(char *serial_number)
+{
+	uint8_t i;
+	char buffer[16];
+
+	memset(buffer,0,sizeof(buffer));
+
+	rf_send((char *)le50_cmd_get_serial_number);
+	le50_get_response(buffer, sizeof(buffer), LE50_AT_COMMAND_RESP_TIMEOUT);
+	for(i =0; i < LE50_SERIAL_NUMBER_SIZE; i++){
+		if(!isalnum((int)buffer[i]))
+			return false;
+	}
+	strcpy(serial_number,buffer);
+	return TRUE;
+}
+/*************************************/
+bool le50_set_low_power_mode(LE50_LOWPOWER_MODE_T mode)
+{
+	char buffer[16];
+	char command[16];
+
+	memset(command, 0, sizeof(command));
+	sprintf(buffer,"%d", mode);
+	strcat(command, le50_cmd_set_lowpower_mode);
+	strcat(command, buffer);
+	strcat(command,"\r");
+	rf_send(command);
+	PRINT_K(command);
+	le50_get_response(buffer, sizeof(buffer), LE50_AT_COMMAND_RESP_TIMEOUT);
+	if(strstr(buffer, str_le50_OK) != NULL)
+		return TRUE;
+	else
+		return FALSE;
+}
+/*************************************/
+bool le50_set_operating_mode(LE50_OPERATING_MODE_T mode)
+{
+	char buffer[16];
+	char command[16];
+
+	memset(command, 0, sizeof(command));
+
+	sprintf(buffer,"%d", mode);
+	strcat(command, le50_cmd_set_operating_mode);
+	strcat(command, buffer);
+	strcat(command,"\r");
+	rf_send(command);
+	PRINT_K(command);
+	le50_get_response(buffer, sizeof(buffer), LE50_AT_COMMAND_RESP_TIMEOUT);
+	if(strstr(buffer, str_le50_OK) != NULL)
+		return TRUE;
+	else
+		return FALSE;
+}
+/*************************************/
+bool le50_set_aes_key(const char *key)
+{
+	char buffer[16];
+	char command[16];
+
+	memset(command, 0, sizeof(command));
+	strcat(command, le50_cmd_set_aes_key);
+	strcat(command, key);
+	strcat(command, "\r");
+	rf_send(command);
+	PRINT_K(command);
+	le50_get_response(buffer, sizeof(buffer), LE50_AT_COMMAND_RESP_TIMEOUT);
+	PRINT_K(buffer);
+	if(strstr(buffer, str_le50_OK) != NULL)
+		return TRUE;
+	else
+		return FALSE;
+}
+/*************************************/
+bool le50_set_network_options(uint8_t options)
+{
+	char buffer[16];
+	char command[16];
+
+	memset(command, 0, sizeof(command));
+	sprintf(buffer,"%d", options);
+	strcat(command, le50_cmd_set_network_opt);
+	strcat(command, buffer);
+	strcat(command,"\r");
+	rf_send(command);
+	PRINT_K(command);
+	le50_get_response(buffer, sizeof(buffer), LE50_AT_COMMAND_RESP_TIMEOUT);
+	PRINT_K(buffer);
+	if(strstr(buffer, str_le50_OK) != NULL)
+		return TRUE;
+	else
+		return FALSE;
+}
+/*************************************/
+bool le50_activate_at_mode()
+{
+	char buffer[16];
+	rf_send((char *)le50_cmd_set_at_mode);
+	le50_get_response(buffer, sizeof(buffer), LE50_AT_COMMAND_RESP_TIMEOUT);
+	PRINT_K(buffer);
+	if(strstr(buffer, str_le50_OK) != NULL){
+		return TRUE;
+	}
+	else
+		return FALSE;
+}
+/*************************************/
+bool le50_activate_online_mode()
+{
+	char buffer[16];
+	rf_send((char *)le50_cmd_set_online_mode);
+	PRINT_K(le50_cmd_set_online_mode);
+	le50_get_response(buffer, sizeof(buffer), LE50_AT_COMMAND_RESP_TIMEOUT);
+	PRINT_K(buffer);
+	if(strstr(buffer, str_le50_OK) != NULL)
+		return TRUE;
+
+	else
+		return FALSE;
+}
+
+
+/*************************************/
+uint16_t le50_get_response(char *buffer, uint16_t buffer_size, uint32_t timeout)
+{
+	TIMER_INFO_T at_response_timer;
+	TIMER_INFO_T idle_timer;
+	uint16_t bytes_read;
+	uint16_t total_bytes = 0;
+	char temp[16];
+
+	memset(buffer,0,buffer_size);
+
+	Set_Timer(&at_response_timer, timeout);
+
+	while(!mn_timer_expired(&at_response_timer)){
+		bytes_read = rf_get_rx_buffer(temp, sizeof(temp), LE50_868_IDLE_TIMEOUT);
+	    if(bytes_read > 0){
+	    	Set_Timer(&idle_timer, LE50_868_IDLE_TIMEOUT);
+	    	memcpy(&buffer[total_bytes], temp, bytes_read);
+	    	total_bytes += bytes_read;
+	    }
+	    else{
+	        if((mn_timer_expired(&idle_timer)) && ( total_bytes > 0)){
+	        	PRINT_K(buffer);
+	        	return total_bytes;
+	        }
+	     }
+	}
+
+	return total_bytes;
+}
+

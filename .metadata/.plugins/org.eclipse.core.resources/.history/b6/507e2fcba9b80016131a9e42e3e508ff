@@ -1,0 +1,203 @@
+/*
+===============================================================================
+ Name        : T2.c
+ Author      : $(author)
+ Version     :
+ Copyright   : $(copyright)
+ Description : main definition
+===============================================================================
+*/
+
+#if defined (__USE_LPCOPEN)
+#if defined(NO_BOARD_LIB)
+#include "chip.h"
+#else
+#include "board.h"
+#include "iap_config.h"
+#include "timer.h"
+#include "le50.h"
+#include "bsp.h"
+#include "MMA8652.h"
+#include "sst25.h"
+#include "gps.h"
+#include "gSensor.h"
+#include "settings.h"
+#include "gsm.h"
+#include "i2c.h"
+#include "io_ctrl.h"
+#include "spi.h"
+#include "status.h"
+#include "onewire.h"
+#include "can.h"
+#include "adc.h"
+#include "messages.h"
+#include "offline.h"
+#include "trace.h"
+#include "ProcessTask.h"
+#include "rf_task.h"
+#include "string.h"
+#endif
+#endif
+
+#include <cr_section_macros.h>
+#define UPGRADE_PARAMETERS_SEC		15
+void bod_init();
+
+int main(void)
+{
+	char printBuf[256];
+	SystemCoreClockUpdate();
+    SysTick_Config(SystemCoreClock / TICKRATE_HZ1);
+    bod_init();
+
+    debug_init();
+    PRINT_K("\n******************Starting-up T2*****************\n");
+    PRINT_K(VERSION);
+    PRINT_K("\n*************************************************\n");
+    UpgradeValidityCheck();
+    sprintf(printBuf, "\nSystem Clock Freq:%d\n",Chip_Clock_GetSystemClockRate());
+    PRINT_K(printBuf);
+    gpio_init();
+
+    status_task_init();
+    sst25_init();
+
+  //  sst25_erase_flash();
+    i2c_init();
+    mma865x_init();
+  /*  PRINT_K("\nKm        Offline Write Addr      Offline Read Addr\n");
+    for(i = 0; i < SST25_SECTOR_SIZE; i = i+ 4){
+
+        	sst25_read_array(KM_COUNTER_FLASH_ADDRESS + i, sizeof(uint32_t), (char *)&buffer1);
+        	sst25_read_array(OFFLINE_DATA_WRITE_ADDRESS + i, sizeof(uint32_t), (char *)&buffer2);
+        	sst25_read_array(OFFLINE_DATA_READ_ADDRESS + i, sizeof(uint32_t), (char *)&buffer3);
+        	sprintf( printBuf,"%X             %X,                    %X\n",buffer1,buffer2,buffer3);
+        	PRINT_K( printBuf);
+        	Delay(1, NULL);
+       }
+*/
+    Init_DriverProfileTask();
+    settings_load_user_settings();
+    offline_data_init();
+    gps_init(0);   /* 0 for auto-baud */
+    le50_uart_init(LE50_BAUD_RATE);
+    if(le50_init()){
+    	PRINT_K("\nLE50 detected on accessories port. Reserving for LE50 RF module.....\n");
+    	rf_init();
+    }
+    else{
+    	le50_uart_init(RFID_BAUD_RATE);
+    	PRINT_K("\nCnot find LE50 on accessories port. Reserving for RFID module.....\n");
+    }
+
+
+    gps_set_nmea_msg_freq(100);
+ /* Load_BlockageSetting(); commented out for testing purpose */
+    gsm_init();
+    onewire_init();
+    adc_init();
+    can_init();
+
+
+  /*  while(1)
+    {
+    	Chip_GPIO_SetPinState(LPC_GPIO, DOUT1_GPIO_PORT_NUM, DOUT1_GPIO_PIN_NUM, FALSE);
+    	Chip_GPIO_SetPinState(LPC_GPIO, DOUT2_GPIO_PORT_NUM, DOUT2_GPIO_PIN_NUM, FALSE);
+    	Delay(10,NULL);
+    	Chip_GPIO_SetPinState(LPC_GPIO, DOUT1_GPIO_PORT_NUM, DOUT1_GPIO_PIN_NUM, TRUE);
+    	Chip_GPIO_SetPinState(LPC_GPIO, DOUT2_GPIO_PORT_NUM, DOUT2_GPIO_PIN_NUM, TRUE);
+    	Delay(10,NULL);
+
+    }*/
+
+    Process_Task();
+    PRINT_K("\nProcessTask Returned. Resetting....\n");
+    Delay(SECOND, NULL);
+    NVIC_SystemReset();
+  /*  while(1){
+    if(mn_timer_expired(&HEARTBEAT_TIMER1)){
+    			MMA865x_Read_Accel_Values(&mma8652_accel_values);
+    			gInputBuffer[gSampleCount] = mma8652_accel_values;
+
+    			if(gSampleCount == MOVING_AVG_WINDOW_SIZE - 1){
+    				forwardAccAnalyzeBuffer[i] = MovingAverage(gInputBuffer);
+    				sprintf(printBuf, "%f,%f,%f,%f,%f,%f\n",gInputBuffer[gSampleCount].xAccel,
+    														gInputBuffer[gSampleCount].yAccel,
+															gInputBuffer[gSampleCount].zAccel,
+															forwardAccAnalyzeBuffer[i].xAccel,
+															forwardAccAnalyzeBuffer[i].yAccel,
+															forwardAccAnalyzeBuffer[i].zAccel);
+    				PRINT_K(printBuf);
+
+
+    				ShiftBuffer(gInputBuffer, MOVING_AVG_WINDOW_SIZE);
+    				 if(i == (FORWARD_ACC_ANALYZE_BUFFER_SIZE - 1)){
+    					 if(CheckSuddenAccelAlarm(forwardAccAnalyzeBuffer, FORWARD_ACC_ANALYZE_BUFFER_SIZE, SUDDEN_ACCL_THREHOLD_VALUE))
+    						 PRINT_K("\nAni Hizlanma Alarmi\n");
+    					 ShiftBuffer(forwardAccAnalyzeBuffer, FORWARD_ACC_ANALYZE_BUFFER_SIZE);
+    				 }
+
+
+    				 else
+    					i++;
+    			}
+    			else
+    			    gSampleCount++;
+    			Set_Timer(&HEARTBEAT_TIMER1, 10);
+    	}
+    }*/
+
+
+    return 0;
+}
+/*******************************************************************/
+void bod_init()
+{
+	Chip_SYSCTL_EnableBODReset();
+}
+/*******************************************************************/
+void UpgradeValidityCheck() {
+
+	char buffer[1024];
+	uint16_t validity_check = (*(uint16_t *)(UPGRADE_PARAMETERS_ADDR + 1022));
+	sprintf(buffer, "\nValidity Check: 0x%X ", validity_check);
+	PRINT_K( buffer );
+	validity_check = (*(uint16_t *)(UPGRADE_PARAMETERS_ADDR + 1022));
+	sprintf(buffer, "\nValidity Check: 0x%X ", validity_check);
+	PRINT_K( buffer );
+	if( validity_check == 0x9999 ){
+
+			PRINT_K("\nFirst start of upgrade image");
+		//	__disable_irq();
+		    Chip_IAP_PreSectorForReadWrite(UPGRADE_PARAMETERS_SEC, UPGRADE_PARAMETERS_SEC);
+			Chip_IAP_EraseSector(UPGRADE_PARAMETERS_SEC, UPGRADE_PARAMETERS_SEC );
+		//	__enable_irq();
+			int i = 0;
+			for (i=0; i<1022; i++){
+				buffer[i] = 0xFF;
+			}
+			buffer[1022] = 0xAA;
+			buffer[1023] = 0xAA;
+		//	__disable_irq();
+			Chip_IAP_PreSectorForReadWrite( UPGRADE_PARAMETERS_SEC, UPGRADE_PARAMETERS_SEC );
+			Chip_IAP_CopyRamToFlash(UPGRADE_PARAMETERS_ADDR,(uint32_t *) buffer,1024);
+			//__enable_irq();
+			Delay(100, NULL);
+	}
+}
+
+/*void Init_Debug()
+{
+
+	Chip_UART_Init(LPC_UART0);
+	Chip_UART_SetBaud(LPC_UART0, 115200 );
+	Chip_UART_ConfigData(LPC_UART0, UART_LCR_WLEN8 | UART_LCR_SBS_1BIT | UART_LCR_PARITY_DIS);
+
+
+	Chip_UART_TXEnable(LPC_UART0);
+}
+
+*/
+
+
+

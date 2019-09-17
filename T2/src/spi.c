@@ -1,0 +1,167 @@
+
+#include "chip.h"
+#include "board.h"
+#include "timer.h"
+#include "settings.h"
+#include "trace.h"
+#include "sst25.h"
+#include "utils.h"
+#include "spi.h"
+#include <string.h>
+#include <stdlib.h>
+uint8_t SST25_ReadSR();
+bool SST25_IsBusy();
+
+void dumpFlashInfo(uint32_t flashType);
+void SPI_AssertSSEL(void);
+void SPI_DeassertSSEL(void);
+void SPI_TransferComplete(void);
+
+
+static SPI_CONFIG_FORMAT_T spi_format;
+static SPI_DATA_SETUP_T spi_xf;
+static volatile uint8_t  b_transferDone = FALSE;
+/*****************************************************************
+ Pin muxing configuration for SPI interface
+ refer to section 8.5.1 Pin Function Select Register 0 and
+ section 8.5.2 Pin Function Select Register 1 to select IOCON_FUNC mode
+****************************************************************/
+static const PINMUX_GRP_T T2_spiPortMuxTable[] = {
+	{0,  15,   IOCON_MODE_PULLDOWN   | IOCON_FUNC3},	/* MEM_SCK */
+	{0,  16,   IOCON_MODE_PULLUP     | IOCON_FUNC0},	/* MEM_CE */
+	{0,  17,   IOCON_MODE_PULLDOWN   | IOCON_FUNC3},	/* MISO */
+	{0,  18,   IOCON_MODE_PULLDOWN   | IOCON_FUNC3},	/* MOSI */
+};
+
+/****************************************************************/
+void Trio_Init_SPI()
+{
+	Chip_IOCON_SetPinMuxing(LPC_IOCON, T2_spiPortMuxTable, sizeof(T2_spiPortMuxTable) / sizeof(PINMUX_GRP_T));
+
+	Chip_GPIO_SetPinDIROutput(LPC_GPIO, 0, 16);
+
+	SPI_DeassertSSEL();
+	Chip_SPI_Init(LPC_SPI);
+
+	spi_format.bits = SPI_BITS_8;
+	spi_format.clockMode = SPI_CLOCK_MODE0;
+	spi_format.dataOrder = SPI_DATA_MSB_FIRST;
+	Chip_SPI_SetFormat(LPC_SPI, &spi_format);
+
+	Chip_SPI_SetBitRate(LPC_SPI, 400000);
+
+	spi_xf.fnBefFrame =NULL;
+	spi_xf.fnAftFrame =NULL;
+	spi_xf.fnBefTransfer = NULL;
+	spi_xf.fnAftTransfer = SPI_DeassertSSEL;
+	Chip_SPI_SetMode(LPC_SPI, SPI_MODE_MASTER);
+
+    NVIC_SetPriority(SPI_IRQn, 5);
+	NVIC_EnableIRQ(SPI_IRQn);
+	PRINT_K("\nSPI Initialized\n");
+}
+/*******************************************************************/
+/* Assert SSEL pin */
+void SPI_AssertSSEL(void)
+{
+	Chip_GPIO_WritePortBit(LPC_GPIO, 0, 16, false);
+}
+
+/* De-Assert SSEL pin */
+void SPI_DeassertSSEL(void)
+{
+	Chip_GPIO_WritePortBit(LPC_GPIO, 0, 16, true);
+	b_transferDone = TRUE;
+}
+/*******************************************************************
+* Interrupt handler for SPI interface                              *
+********************************************************************/
+void  SPI_IRQHandler(void)
+{
+
+	Chip_SPI_Int_Disable(LPC_SPI);	/* Disable all interrupt */
+	Chip_SPI_Int_RWFrames8Bits(LPC_SPI, &spi_xf);
+
+	if (spi_xf.cnt < spi_xf.length) {
+		Chip_SPI_Int_Enable(LPC_SPI);	/* enable all interrupts */
+	}
+}
+
+/************************************************************************/
+void xmitRecvSpiData(uint8_t *tx_buffer, uint8_t *rx_buffer, uint16_t length)
+{
+	TIMER_INFO_T spi_timer;
+	spi_xf.cnt = 0;
+	spi_xf.length = length;
+	spi_xf.pTxData = tx_buffer;
+	spi_xf.pRxData = rx_buffer;
+
+	b_transferDone = FALSE;
+
+	Chip_SPI_Int_FlushData(LPC_SPI);		/* flush dummy data from SPI FiFO */
+	SPI_AssertSSEL();
+
+	Chip_SPI_Int_RWFrames8Bits(LPC_SPI, &spi_xf);
+	Chip_SPI_Int_Enable(LPC_SPI);			/* enable interrupt */
+
+	Set_Timer(&spi_timer, 100);
+	 /* wait operation to complete or timeout*/
+	while((!b_transferDone) && (!mn_timer_expired(&spi_timer)));
+
+	b_transferDone = FALSE;
+
+//	PRINT_K("\nTRANSFER DONE\n");
+}
+
+/************************************************************************/
+void SST25_EnableWSR()
+{
+	uint8_t spiRxBuffer[2];
+	uint8_t spiTxBuffer[2];
+
+	spiTxBuffer[0]= SST25_EWSR;
+	xmitRecvSpiData(spiTxBuffer, spiRxBuffer, 1);
+	while(sst25_is_busy());
+}
+/********************************************************************/
+void SST25_WriteSR(uint8_t value)
+{
+	uint8_t spiRxBuffer[2];
+	uint8_t spiTxBuffer[2];
+
+	SST25_WriteEnable();
+	SST25_EnableWSR();
+
+	spiTxBuffer[0]= SST25_WRSR;
+	spiTxBuffer[1]= value;
+
+	xmitRecvSpiData(spiTxBuffer, spiRxBuffer, 2);
+	while(sst25_is_busy());
+}
+
+
+void SPI_Task()
+{
+
+}
+
+/*void SPI_Task()
+{
+	switch(spiState)
+	{
+		case SPI_IDLE:
+		break;
+
+		case SPI_BUSY:
+		SST25_ReadSR();
+		break;
+
+		case SPI_WAIT_XFER_COMPLETE:
+		if(spi_xfer_completed){
+			spiState = SPI_IDLE;
+			spi_xf.fnUserCallback();
+		}
+		break;
+	}
+}*/
+

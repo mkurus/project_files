@@ -1,0 +1,67 @@
+/*
+ * rf_task.h
+ *
+ *  Created on: 24 Eki 2016
+ *      Author: admin
+ */
+
+#ifndef RF_TASK_H_
+#define RF_TASK_H_
+
+#define HEADER_MODULE_ID        "1="
+#define HEADER_MESSAGE_TYPE     "2="
+#define HEADER_DOOR_STATUS      "3="
+#define HEADER_TEMPERATURE      "4="
+#define HEADER_BATT_VOLTAGE     "5="
+#define HEADER_ALARM_STATUS     "6="
+#define HEADER_RSSI             "/-"
+
+#define     NUMBER_OF_TRAILER_ID_MESSAGES       5
+
+#define     LE50_UART_RRB_SIZE                  512
+#define     LE50_UART_SRB_SIZE                  128
+#define		RF_MAX_PACKET_SIZE                  128
+#define     RF_MAX_MSG_FIELD_SIZE               16
+#define     RF_PACKET_TIMEOUT                   100
+#define     RF_NODE_ALIVE_TIMEOUT               (2* MINUTE)
+#define     RF_NODE_MSG_FIELD_SEPERATOR         ';'
+#define     NUMBER_OF_RF_NODE_DOOR_CHANNELS      2
+
+#define     TRILER_DETECTION_DELAY_TIME         (1 * MINUTE)
+
+
+
+typedef struct RF_MSG_PARSER_INFO
+{
+	char str_app_id[4];
+	bool (*field_parser_callback)(RF_NODE_T *node, char * pos, char *buffer);
+}RF_MSG_PARSER_INFO_T;
+
+
+void le50_uart_init();
+void rf_uart_init();
+void rf_send(char *command);
+void read_registered_node_table();
+void rf_get_node_in_ram(RF_NODE_T *node, uint16_t index);
+int16_t rf_search_node_in_array(RF_NODE_T *node);
+int16_t rf_find_free_node_array_index();
+int16_t rf_find_highest_trailer_id_rssi_node_index();
+bool rf_add_node_to_array(RF_NODE_T *node);
+bool rf_get_node_presence_status();
+bool rf_check_node_alarm_exist();
+bool rf_is_registered_node(RF_NODE_T *node);
+uint8_t rf_get_alive_nodes(RF_NODE_T *node);
+void rf_get_registered_node_list(REG_NODE_INFO_T *reg_node_list);
+void rf_update_node_table(RF_NODE_T *node);
+bool rf_get_node_alarm(RF_NODE_T *node);
+bool rf_get_node_alarm(RF_NODE_T *node);
+bool rf_identify_trailer(RF_NODE_T *node);
+bool rf_is_trailer_identified();
+void rf_update_alive_status();
+void rf_process_trailer_tracking_message();
+bool rf_get_trailer_node_id(char *node_id);
+bool rf_parse_packet(char *recv_buffer);
+uint16_t rf_get_rx_buffer(char *buffer,  uint16_t buffer_size, TIMER_TICK_T idle_timeout);
+void rf_clear_node_alarm(uint16_t node_index);
+bool Rf_Task();
+#endif /* RF_TASK_H_ */

@@ -1,0 +1,156 @@
+/*
+ * gsm.h
+ *
+ *  Created on: 25 Şub 2016
+ *      Author: admin
+ */
+
+#ifndef GSM_H_
+#define GSM_H_
+
+#ifndef TTYPES_H_
+#include "ttypes.h"
+#endif
+
+#ifndef TIMER_H__
+#include "timer.h"
+#endif
+
+#define QUECTEL_MAX_TCP_SEND_SIZE   1400
+#define QUECTEL_MAX_TCP_RECV_SIZE   1500
+#define GSM_UART_SRB_SIZE           2048	   /* Send ring buffer size */
+#define GSM_UART_RRB_SIZE           2048	   /* Receive ring buffer size */
+#define MAX_TCP_RECEIVE_SIZE        256
+
+#define IMEI_LENGTH                 15
+#define IMSI_LENGTH                 15
+#define MAX_SMS_LENGTH              160
+#define DEST_ADDR_LENGTH            24
+#define MAX_NUMBER_OF_HELD_CALLS    10
+
+#define DIAL_TIMEOUT                     (5 * SECOND)
+#define SMS_SENT_RESPONSE_TIMEOUT        (10 * SECOND)
+#define GSM_REGISTRATION_TIMEOUT         (60 * SECOND)     /* 60 secs registration timeout */
+#define GPRS_ATTACH_TIMEOUT              (60 * SECOND)     /* 60 secs registration timeout */
+#define SERVER_CONNECTION_TIMEOUT        (10 * SECOND)
+#define OFFLINE_DATA_SEND_INTERVAL       (10 * SECOND)
+#define NUMBER_OF_CONNECT_RETRY          10
+#define DATA_SEND_RETRY_COUNT            5
+#define NUMBER_OF_STATUS_CHECK_RETRIES   3
+#define NUMBER_OF_ANSWER_CALL_RETRIES    3
+#define DEFAULT_RETRIES                  3
+#define SOCKET_CLOSE_RETRIES             5
+#define KEEP_ALIVE_TIMEOUT               (5 * MINUTE)
+#define MODEM_STATUS_CHECK_PERIOD        (3 * SECOND)    /* status check period */
+#define SEND_FAIL_TIMEOUT                (2 * HOUR)
+#define MAX_NUMBER_OF_NONACKED_BYTES     2000
+typedef struct SERVER_INFO{
+	char server_ip[128];
+	char server_port[6];
+}SERVER_INFO_T;
+
+typedef struct TCP_CONNECTION_INFO{
+	SERVER_INFO_T tcpServerInfo_t;
+	uint8_t u8_connectionRetryCount;
+}TCP_CONNECTION_INFO_T;
+
+typedef enum {
+	AT_PARAM_INTEGER,
+	AT_PARAM_STRING
+}AT_PARAM_TYPE ;
+
+typedef enum{
+	AUDIO_CH1 = '0',
+	AUDIO_CH2_EARPHONE,
+	AUDIO_CH2_LOUDSPKR
+}GSM_AUDIO_CH;
+
+typedef struct GSM_STATS
+{
+	uint16_t u16_totalBytesSent;
+	uint16_t u16_totalBytesRecv;
+	uint16_t u16_totalBytesBuffered;
+	uint16_t u16_totalBytesNonAcked1;
+	uint16_t u16_totalBytesNonAcked2;
+}GSM_STATS_T;
+
+typedef struct GSM_INFO
+{
+	GSM_STATS_T gsm_stats;
+	uint8_t csq;
+	char imei_no[IMEI_LENGTH + 1];
+	char imsi_no[IMSI_LENGTH + 1];
+	char local_ip[64];
+	bool b_gsmRegistered;
+	bool b_roaming;
+	bool b_socketActive;
+	bool b_gsmHealtStatus;
+	uint16_t batteryLevel;
+}GSM_INFO_T;
+
+typedef enum {
+	MO_CALL,            /* mobile originated call*/
+	MT_CALL             /* mobile terminated call*/
+}CALL_DIRECTION;
+
+typedef enum{
+	CALL_STATUS_ACTIVE,
+	CALL_STATUS_HELD,
+	CALL_STATUS_DIALING,
+	CALL_STATUS_ALERTING,
+	CALL_STATUS_INCOMING,
+	CALL_STATUS_WAITING
+}CALL_STATUS;
+
+typedef enum{
+	CALL_MODE_VOICE,
+	CALL_MODE_DATA,
+	CALL_MODE_FAX,
+	CALL_MODE_UNKNOWN
+}CALL_MODE;
+
+typedef enum{
+	CALL_NOT_CONFERENCE,
+	CALL_CONFERENCE
+}CALL_MPTY;
+
+typedef enum{
+	CALL_TYPE_UNKNOWN = 129,
+	CALL_TYPE_INTERNATIONAL = 145
+}CALL_TYPE;
+
+typedef struct GSM_CALL{
+	uint16_t idx;
+	CALL_STATUS stat;
+	CALL_MODE mode;
+	CALL_TYPE type;
+	CALL_MPTY mpty;
+	CALL_DIRECTION dir;
+	char number[64];
+}GSM_CALL_T;
+
+COMMAND_RESULT_T gsm_check_modem_status(uint8_t retryCount);
+uint16_t Get_GsmTcpBuffer(uint8_t *buffer, uint16_t length, void (*callBackFunc)());
+int16_t GetBatteryVoltage();
+bool gsm_get_socket_status(char *buffer);
+bool gsm_get_socket_stats(char *buffer);
+bool gsm_send_sms(char *destAddr, char *smsText, void (*onIdleCallback)());
+void GsmCommUART_IsrHandler();
+void gsm_refresh_message_timer();
+void gsm_init();
+void Get_GsmInfo(GSM_INFO_T * out_buffer);
+void gsm_power_on_module();
+void gsm_power_off_module();
+void gsm_turn_on_module();
+void gsm_turn_off_module();
+void gsm_hard_reset();
+void on_idle();
+void Init_GsmTask();
+void gsm_set_connection_parameters(char *server_ip, char *server_port);
+bool gsm_get_server_connection_status();
+bool gsm_scan();
+TIMER_TICK_T gsm_get_data_send_period();
+bool gsm_get_healt_status();
+bool gsm_dial(char *gsm_no,  void (*callback)());
+bool gsm_send_message(char *pdata, uint16_t i_msgLen, void (*onIdleCallback)());
+#endif /* GSM_H_ */

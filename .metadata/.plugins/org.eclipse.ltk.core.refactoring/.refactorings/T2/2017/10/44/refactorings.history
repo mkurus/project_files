@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<session version="1.0">
+<refactoring comment="Rename resource &apos;T2/src/gm_task.c&apos; to &apos;gsm_task.c&apos;" description="Rename resource &apos;gm_task.c&apos;" flags="7" id="org.eclipse.ltk.core.refactoring.rename.resource" input="src/gm_task.c" name="gsm_task.c" stamp="1509095149626" updateReferences="true"/>
+</session>

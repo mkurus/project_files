@@ -1,0 +1,169 @@
+/*
+ * status.h
+ *
+ *  Created on: 7 Mar 2016
+ *      Author: admin
+ */
+
+#ifndef STATUS_H_
+#define STATUS_H_
+
+#ifndef TIMER_H_
+#include "timer.h"
+#endif
+#ifndef SETTINGS_H_
+#include "settings.h"
+#endif
+
+
+#define MIN_NUMBER_OF_SATS_FOR_BLOCKAGE    5
+#define TRIP_START_INFO_BUFFER_SIZE        64
+#define LDR_THRESHOLD_VALUE                20
+
+#define PININT(pin_number)                 (1 << (pin_number))
+
+typedef enum IDLE_STATE_T    { IDLE_STATE,NOT_IDLE_STATE,WAITING_IDLE_TIMEOUT_STATE}  IDLE_STATES;
+typedef enum IGN_STATE_T     { NOT_IGNITED_STATE, IGNITED_STATE }                     IGN_STATES;
+typedef enum SIM_STATE_T     { SIM_REMOVED_STATE, SIM_INSERTED_STATE}                 SIM_STATES;
+typedef enum PWR_STATE_T     { POWER_REMOVED_STATE, POWER_APPLIED_STATE}              PWR_STATES;
+typedef enum SPEED_STATE_T   { BELOW_SPEED_LIMIT_STATE, ABOVE_SPEED_LIMIT_STATE, WAIT_SPEED_ALARM_TIMEOUT_STATE } SPEED_STATES;
+typedef enum STOP_STATES_T   { STOPPED_STATE, NOT_STOPPED_STATE, WAITING_STOP_TIMEOUT_STATE }STOP_STATES;
+typedef enum DIN_STATES_T    { DIN_HIGH_STATE, DIN_LOW_STATE  } DIN_STATES;
+typedef enum COVER_STATES_T  { COVER_CLOSED, COVER_OPEN } COVER_STATES;
+
+typedef enum GPS_TRIP_STATUS{
+	VALID_GPS_ON_IGNITION,
+	INVALID_GPS_ON_IGNITION,
+	VALID_GPS_ON_DEIGNITION,
+	INVALID_GPS_ON_DEIGNITION
+}GPS_TRIP_STATUS_T;
+
+typedef struct DIN_HW_CFG{
+	uint8_t port;
+	uint8_t pin;
+	TIMER_TICK_T debounceTime;
+	//DETECT_HW_TYPE type;
+	//void (*rise_int_callback)();    /* callback when rising edge detected */
+	//void (*fall_int_callback)();	/* callback when falling edge detected */
+}DIN_HW_CFG_T;
+
+/**
+ *
+ */
+typedef struct DIGINPUT_INFO_T{
+	bool state;
+	bool b_currentStatus;
+	bool b_prevStatus;
+	bool b_value;
+	TIMER_INFO_T *debounce_timer;
+	void (*high_callback)();    /* callback when rising edge detected */
+	void (*low_callback)();	/* callback when falling edge detected */
+}DIGINPUT_INFO;
+
+
+typedef enum {
+	IGNITION_BIT_POS,
+	ROAMING_BIT_POS,
+	GPS_BIT_POS,
+	POWER_STATUS_BIT
+}STATUS_BITS;
+
+typedef enum{
+	DIGITAL_INPUT1_BIT_POS,
+	DIGITAL_INPUT2_BIT_POS,
+	DIGITAL_INPUT3_BIT_POS,
+	DIGITAL_INPUT4_BIT_POS,
+	DIGITAL_INPUT5_BIT_POS,
+	DIGITAL_INPUT6_BIT_POS,
+}DIGITAL_INPUT_STATUS_BIT;
+typedef struct SIM_STATUS_INFO_T
+{
+	bool b_simInserted;
+	SIM_STATES simState;
+	TIMER_INFO_T sim_debounce_timer;
+}SIM_STATUS_INFO;
+
+typedef struct PWR_STATUS_INFO_T
+{
+	bool b_powered;
+	PWR_STATES pwrState;
+	TIMER_INFO_T pwr_debounce_timer;
+}PWR_STATUS_INFO;
+
+typedef struct TRIP_INFO{
+	char tripStartInfoBuffer[TRIP_START_INFO_BUFFER_SIZE];
+	uint32_t u32_tripStartKm;
+	uint32_t u32_tripEndKm;
+	uint32_t u32_totalTripIdleTime;
+	GPS_TRIP_STATUS_T gpsStatus;
+}TRIP_INFO_T;
+
+typedef struct SPEED_LIMIT_INFO_T
+{
+	TIMER_INFO_T speed_alarm_timer;
+	TIMER_INFO_T speed_secs_counter_timer;
+	TIMER_TICK_T u32_totalSpeedViolationTime;
+	SPEED_STATES state;
+}SPEED_LIMIT_INFO;
+
+typedef struct IDLE_INFO_T
+{
+	TIMER_INFO_T idle_alarm_timer;
+	TIMER_INFO_T idle_secs_counter_timer;
+	TIMER_TICK_T u32_totalIdleTime;
+	TIMER_TICK_T u16_idleTimeBetweenMessage;
+	IDLE_STATES state;
+}IDLE_INFO;
+
+typedef struct STOP_INFO_T
+{
+	TIMER_INFO_T stop_alarm_timer;
+	TIMER_INFO_T stop_secs_counter_timer;
+	TIMER_TICK_T u32_totalStopTime;
+	STOP_STATES  state;
+}STOP_INFO;
+
+typedef struct DIGINPUT_EVENT_T
+{
+	uint8_t event_digital_input_high_to_low:1;
+	uint8_t event_digital_input_low_to_high:1;
+}DIGINPUT_EVENT;
+GPS_TRIP_STATUS_T Get_TripGpsStatus();
+void SetBlockage(bool blockageStatus);
+void clear_events();
+//void set_event(MESSAGE_TYPE_T event);
+void Get_BlockageInfo(BLOCKAGE_INFO_T *blockage);
+void InitStatusTask();
+void Init_TripInfo(GPS_TRIP_STATUS_T status);
+void task_status();
+void ResetTotalIdleTime();
+void ResetStopTime();
+void ResetInterMessageIdleTime();
+bool Init_IgntionDetection();
+bool Init_SimDetection();
+bool Init_PowerDetection();
+bool Init_DigitalInputs();
+bool Init_IdleInfo();
+bool Init_StopInfo();
+bool Init_SpeedLimitInfo();
+bool Get_SimDetectPinStatus();
+bool Get_IgnitionPinStatus();
+bool Get_PwrDetectPinStatus();
+bool Get_ExtPowerStatus();
+bool Get_IgnitionStatus();
+bool Get_DinStatus(DIN_HW_CFG_T const *din_cfg);
+bool Get_EventStatus();
+uint8_t GetDigitalInputs();
+uint32_t Get_TripIdleTime();
+uint32_t Get_TripDistance();
+uint32_t GetStatusWord();
+TIMER_TICK_T GetInterMessageIdleTime();
+TIMER_TICK_T GetTotalIdleTime();
+TIMER_TICK_T GetStopTime();
+TIMER_TICK_T GetSpeedViolationDuration();
+char * Get_TripStartInfoBufferPtr();
+void Set_RfNodeDoorOpenedAlarm(uint8_t door_ch);
+void Set_RfNodeDoorClosedAlarm(uint8_t door_ch);
+void status_task_init();
+void ProcessGSensorTask();
+#endif /* STATUS_H_ */

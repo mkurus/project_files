@@ -1,0 +1,76 @@
+/*
+ * can.h
+ *
+ *  Created on: 15 Mar 2016
+ *      Author: admin
+ */
+
+#ifndef CAN_H_
+#define CAN_H_
+
+#define  NUMBER_OF_CAN_PORTS        2     /* Number of CAN port on the chip */
+
+//#define IS_J1708 1
+#define IS_STD_CAN                  1
+//#define IS_AXOR 1
+
+#define CAN_WAKEUP					0
+#define ACCEPTANCE_FILTER_ENABLED	1
+#define ACCF_IDEN_NUM		    	4
+
+
+#define CAN1_BIT_RATE               250000
+#define CAN2_BIT_RATE               250000
+
+#define CAN_MASK_COUNT              20
+#define CAN_BUFFER_SIZE             100
+#define CAN_DATA_TRACE_INTERVAL     (5 * SECOND)
+
+/* Acceptance filter mode in AFMR register */
+typedef enum ACCF_MODE_T{
+	ACCF_ON,
+    ACCF_OFF,
+	ACCF_BYPASS,
+	ACCF_FULLCAN = 0x04
+}ACCF_MODE;
+
+typedef enum CAN_BITRATE_T {
+	 CAN_BUSSPEED_250K = 1,
+	 CAN_BUSSPEED_500K
+}CAN_BITRATE;
+
+typedef enum CAN_FRAME_T{
+	CAN_STD_FRAME = 1,                 /* 11-bit can frame */
+	CAN_EXT_FRAME = 2                  /* 29-bit can frame */
+}CAN_FRAME;
+
+/* Identifiers for FULLCAN, EXP STD, GRP STD, EXP EXT, GRP EXT */
+#define FULLCAN_ID				0x100
+#define EXP_STD_ID				0x100
+#define GRP_STD_ID				0x200
+#define EXP_EXT_ID				0x100000
+#define GRP_EXT_ID				0x200000
+
+/* Type definition to hold a CAN message */
+typedef struct
+{
+	uint32_t Frame; // Bits 16..19: DLC - Data Length Counter
+					// Bit 30: Set if this is a RTR message
+					// Bit 31: Set if this is a 29-bit ID message
+	uint32_t MsgID;	// CAN Message ID (11-bit or 29-bit)
+	uint32_t DataA;	// CAN Message Data Bytes 0-3
+	uint32_t DataB;	// CAN Message Data Bytes 4-7
+} CAN_MSG;
+void CAN_IsrHandler(void);
+void can_set_accf(ACCF_MODE ACCFMode);
+bool can_init();
+void CAN_ISR_Rx2(void);
+void CAN_ISR_Rx1(void);
+void CAN_SetACCF_Lookup(void);
+
+bool ReadCanMsg(uint8_t canChNum);
+bool ReadCanCh1Msg();
+bool ReadCanCh2Msg();
+void TraceCanDataOverUart();
+void Get_CanMessageString(char * buffer,uint16_t length);
+#endif /* CAN_H_ */

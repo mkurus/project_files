@@ -1,0 +1,144 @@
+#include "chip.h"
+#include "board.h"
+#include "timer.h"
+#include "trace.h"
+#include "settings.h"
+#include "status.h"
+#include "io_ctrl.h"
+#include "utils.h"
+#include "messages.h"
+#include <string.h>
+
+#define TRACE_PORT       LPC_UART0
+/*****************************************************************/
+/* Pin muxing configuration */
+
+/* refer to section 8.5.1 Pin Function Select register 0 of UM1060
+ * to select IOCON_FUNC mode
+ * */
+static const PINMUX_GRP_T T2_TracePortMuxTable[] = {
+	{0,  2,   IOCON_MODE_PULLUP | IOCON_FUNC1},	/* TXD0 */
+	{0,  3,   IOCON_MODE_PULLUP | IOCON_FUNC1},	/* RXD0 */
+};
+
+/*****************************************************************/
+#define DEBUG_UART_SRB_SIZE         4096	                 /* Send ring buffer size */
+#define DEBUG_UART_RRB_SIZE         512	                     /* Receive ring buffer size */
+#define DEBUG_BAUD_RATE   		    9600 //115200
+#define DEBUG_UART_ISR_HANDLER 	    UART0_IRQHandler
+#define DEBUG_IRQ_SELECTION 	    UART0_IRQn
+
+static RINGBUFF_T debug_txring,debug_rxring;      /* Transmit and receive ring buffers */
+static uint8_t debug_rxbuff[DEBUG_UART_RRB_SIZE];
+static uint8_t debug_txbuff[DEBUG_UART_SRB_SIZE]; /* Transmit and receive buffers */
+
+static const uint8_t start_char_array[] = {CHAR_SOH, '#',  '\0'};
+static const uint8_t end_char_array[]  =  {  '\n'  , '!',  '\0'};
+/*****************************************************************/
+void debug_init()
+{
+	Chip_IOCON_SetPinMuxing(LPC_IOCON, T2_TracePortMuxTable, sizeof(T2_TracePortMuxTable) / sizeof(PINMUX_GRP_T));
+
+	Chip_UART_Init(TRACE_PORT);
+	Chip_UART_SetBaud(TRACE_PORT, DEBUG_BAUD_RATE );
+	Chip_UART_ConfigData(TRACE_PORT, UART_LCR_WLEN8 | UART_LCR_SBS_1BIT | UART_LCR_PARITY_DIS);
+
+	/* Enable UART Transmit */
+	Chip_UART_TXEnable(TRACE_PORT);
+	RingBuffer_Init(&debug_rxring, debug_rxbuff, 1, DEBUG_UART_RRB_SIZE);
+	RingBuffer_Init(&debug_txring, debug_txbuff, 1, DEBUG_UART_SRB_SIZE);
+
+	/* Reset and enable FIFOs, FIFO trigger level 3 (14 chars) */
+/*	Chip_UART_SetupFIFOS(TRACE_PORT, (UART_FCR_FIFO_EN | UART_FCR_RX_RS |
+						 UART_FCR_TX_RS | UART_FCR_TRG_LEV3));*/
+
+	/* Enable receive data and line status interrupt */
+	Chip_UART_IntEnable(TRACE_PORT, (UART_IER_RBRINT | UART_IER_RLSINT));
+
+	/* preemption = 1, sub-priority = 1 */
+	NVIC_SetPriority(DEBUG_IRQ_SELECTION, 1);
+	NVIC_EnableIRQ(DEBUG_IRQ_SELECTION);
+}
+/****************************************************************/
+void UART0_IRQHandler(void)
+{
+	Chip_UART_IRQRBHandler(TRACE_PORT, &debug_rxring, &debug_txring);
+}
+/****************************************************************/
+void PRINT_K(char *msg)
+{
+
+	Chip_UART_SendRB(TRACE_PORT, &debug_txring, msg, strlen(msg));
+}
+void PRINT_G(char *msg)
+{
+
+	//Chip_UART_SendRB(TRACE_PORT, &debug_txring, msg, strlen(msg));
+}
+void PRINT_GPS(char *msg)
+{
+	return;
+	Chip_UART_SendRB(TRACE_PORT, &debug_txring, msg, strlen(msg));
+}
+void PRINT_OFFLINE(char *msg)
+{
+	return;
+	Chip_UART_SendRB(TRACE_PORT, &debug_txring, msg, strlen(msg));
+}
+void PRINT_CAN(char *msg)
+{
+//	Chip_UART_SendRB(TRACE_PORT, &debug_txring, msg, strlen(msg));
+}
+/******************************************************************/
+void DebugPortTask()
+{
+	LINE_INFO_T line_info;
+	COMMAND_RESULT_T result;
+	COMMAND_RESPONSE_T commandResponse;
+	BLOCKAGE_INFO_T blockage_info;
+	char  debugRxBuffer[DEBUG_UART_RRB_SIZE];
+
+	memset(debugRxBuffer, 0, DEBUG_UART_RRB_SIZE);
+	memset(&commandResponse, 0 ,sizeof(COMMAND_RESPONSE_T));
+
+	line_info.p_uart  = TRACE_PORT;
+	line_info.p_ringBuffer = &debug_rxring;
+	line_info.p_outBuffer = debugRxBuffer;
+	line_info.u16_outBufferSize = DEBUG_UART_RRB_SIZE;
+	line_info.p_startCharArray = (char *)start_char_array;
+	line_info.u8_startCharArraySize = sizeof(start_char_array);
+	line_info.p_endCharArray = (char *)end_char_array;
+	//line_info.u8_endCharArraySize = sizeof(end_char_array);
+	line_info.u16_timeout = SERIAL_DATA_IDLE_TIMEOUT;
+
+	if(Get_UartLine(&line_info)){
+		switch(debugRxBuffer[0]){
+
+			case CHAR_SOH:    /* message from RFID */
+			PRINT_K("\n**************************\n");
+			PRINT_K("\nRFID message on Trace Port: ");
+			PRINT_K(&debugRxBuffer[1]);
+			set_event(RFID_CARD_READING);
+			update_rfid_msg_buffer(&recv_buffer[1]);
+			PRINT_K("\n**************************\n");
+			break;
+
+			case '#':
+			PRINT_K("\nSET message received\n");
+			result = ProcessReceivedData(debugRxBuffer, &commandResponse, COMMAND_SOURCE_UART);
+			if(result == REPLY_ECHO_PACKET)
+				PRINT_K(commandResponse.buffer);
+			if(commandResponse.b_needToReset)
+				NVIC_SystemReset();
+			break;
+		}
+
+	}
+	Get_BlockageInfo(&blockage_info);
+	if(blockage_info.blockageStatus== BLOCKAGE_ACTIVATED &&
+		blockage_info.cmdSource == COMMAND_SOURCE_UART){
+		PrepareBlockageEchoPacket(commandResponse.buffer);
+		PRINT_K(commandResponse.buffer);
+		Set_BlockageStatus(BLOCKAGE_NOT_EXIST);
+	}
+}

@@ -1,0 +1,37 @@
+/*
+ * event.h
+ *
+ *  Created on: 9 Ara 2016
+ *      Author: admin
+ */
+
+#ifndef EVENT_H_
+#define EVENT_H_
+
+#define    T_MSG_EVENT_QUE_SIZE        10
+
+
+
+typedef struct T_MSG_EVENT{
+	char msg_type[4];
+	char param[128];
+	/*char param2[4];
+	char param3[64];
+	char param4[128];*/
+	/*EVENT_COVER_OPENED_T     event_cover_opened;
+	EVT_IGN_STATUS_CHANGED_T event_ign_status_changed;*/
+}T_MSG_EVENT_T;
+
+typedef struct EVT_COVER_OPENED{
+}EVENT_COVER_OPENED_T;
+
+typedef struct EVT_IGN_STATUS_CHANGED{
+	char ign_status[2];
+}EVT_IGN_STATUS_CHANGED_T;
+
+void init_t_msg_event_que();
+bool get_t_msg_event_status();
+bool get_t_msg_event(T_MSG_EVENT_T *event);
+bool put_t_msg_event(T_MSG_EVENT_T *event);
+
+#endif /* EVENT_H_ */

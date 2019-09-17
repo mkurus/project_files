@@ -1,0 +1,1007 @@
+#include "chip.h"
+#include "board.h"
+#include "bsp.h"
+#include "gps.h"
+#include "MMA8652.h"
+#include "gSensor.h"
+#include "io_ctrl.h"
+#include "timer.h"
+#include "settings.h"
+#include "gsm.h"
+#include "status.h"
+#include "ProcessTask.h"
+
+#include "trace.h"
+#include <ctype.h>
+#include <math.h>
+#include <string.h>
+#include <stdlib.h>
+
+#define GPS_PORT                    LPC_UART2
+
+
+#define GPS_UART_ISR_HANDLER 	    UART2_IRQHandler
+#define GPS_IRQ_SELECTION 	        UART2_IRQn
+
+#define GPS_TX_PORT_NUM            0
+#define GPS_RX_PORT_NUM            0
+
+#define GPS_TX_PIN_NUM             10
+#define GPS_RX_PIN_NUM             11
+
+#define NMEA_NEXT_TOKEN(buffer)      if (**buffer != '\0') { (*buffer)++; }
+#define ALPHA                        0.2
+/* Current token in the NMEA sentence */
+#define NMEA_CURRENT_TOKEN(buffer)   ((uint8_t)**buffer)
+float sample_g_data[]={0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+		                0.2778,0,0.5556,0.5556,0.5556,0,0.5556,0,0.5556,
+						0.2778,0.5556,0,0.5556,0.5556,0.5556,0,0.5556,0.5556,
+						0,0.2778,0.5556,0,0.5556,0.5556,0,0.5556,0,
+						0.5556,0,0.5556,0.2778,0,0,0.5556,0,0.5556,
+						0,0.5556,0,0.5556,0,0,0,0,0, 0,-0.5556,
+					    -0.5556,-0.5556,-0.5556,-0.2778,-1.1111,-0.5556,-1.1111,
+						0,0,-0.5556,0,-0.8333,-0.5556,-1.1111,-0.5556,-0.8333,
+		               -0.5556,-0.5556,-0.5556,0,-0.5556,0,0,-0.5556,-0.2778,
+					   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+
+float sample_speed_data[]=    {0.3,    0.6,   1.2,   2.0,   3.4,  3.8,   4.0,  4.5,   4.6,   4.3,    4.3,   4.7,  5.0,
+		                       5.2,    5.5,   6.0,   7.0,   8.0,  8.0,   8.8,  9.2,   9.5,   10.0,   10.5,  11.2, 11.5,
+							   12.0,   12.5,  12.3,  12.0,  12.3, 12.5,  11.8, 12.0,  12.5,  13.0,   12.0,  11.5, 12.5,
+							   13.0,   13.2,  14.0,  14.5,  13.0, 14.5,  15.0, 17.0,  20.0,  20.1,   20.3,  20.5,  21.0,
+							   21.5,   23.0,  25.0,   23.0,  22.8,   22.5,  22.5,  22.5,  21.0, 20.5,  21.0, 20.5,  19.0,  18.0,
+							   16.0,  16.0,   15.8,  15.0,   14.8,  14.0,  13.5,  13.0, 12.0,  11.0, 10.0,  9.8,   9.4,    9.0,   8.8,  8.0,
+                               7.0,    6.0,   4.0,   4.0,   3.0,  2.5,   2.0,  1.0};
+float gps_low_pass_filter(float value, float prev_value,float alpha);
+
+float find_max_g();
+
+/*****************************************************************
+ Pin muxing configuration
+ refer to section 8.5.5 Pin Function Select Register 4 of UM1060
+ to select IOCON_FUNC mode
+****************************************************************/
+static const PINMUX_GRP_T T2_GpsPortMuxTable[] = {
+	{GPS_TX_PORT_NUM,  GPS_TX_PIN_NUM,   IOCON_MODE_PULLUP | IOCON_FUNC1},	/* xmit to GPS module */
+	{GPS_RX_PORT_NUM,  GPS_RX_PIN_NUM,   IOCON_MODE_PULLUP | IOCON_FUNC1},	/* recv from GPS module */
+};
+
+
+G_VALUES_T gsampleBuffer[MOVING_AVG_WINDOW_SIZE];
+static bool gps_healt_status = FALSE;
+static RINGBUFF_T gps_txring,gps_rxring;          /* Transmit and receive ring buffers */
+static uint8_t gps_rxbuff[GPS_UART_RRB_SIZE];
+static uint8_t gps_txbuff[GPS_UART_SRB_SIZE];     /* Transmit and receive buffers */
+static GPS_POSITION_DATA_T current_position;
+static GPS_POSITION_DATA_T prev_position;
+static NMEA_MSG_T nmea_msg_t;
+static double f_distance;
+
+float f_kmTempCounter;
+
+static bool nmea_parse_gpgsa(const char *, NMEA_MSG_T *);
+static bool nmea_parse_gprmc(const char *, NMEA_MSG_T *);
+static bool nmea_parse_gpgga(const char *, NMEA_MSG_T *);
+
+static bool nmea_parse_int(const char **, int8_t, int32_t *const);
+static bool nmea_parse_character(const char **, char *const);
+static bool nmea_parse_fixed_point(const char **, int32_t *const, int32_t *const);
+
+bool ValidateNMEAChecksum(char *);
+
+static int32_t gps_convert_to_linear_degrees(const struct nmea_gps_coord_val *const,const enum nmea_gps_coord_indicator);
+static double  gps_calculate_distance(int32_t, int32_t, int32_t, int32_t);
+void ParseNMEAMessage(char* gps_msg, NMEA_MSG_T *nmea_msg_t);
+void EnableGpsPower();
+float gps_calc_g(float current_speed);
+GPS_POSITION_DATA_T  *ProcessGPSMessage(char *,  NMEA_MSG_T *);
+/*float sample_g_data[]={-0.140625,-0.066406,-0.050781, 0.007812,-0.062500, -0.031250, -0.046875, 0.070312, -0.871094, -0.941406,  0.050781,
+		                -1.070312, -0.980469, -0.953125, -1.019531, 0.155000,  0.000000,  0.007812, 1.082031, 1.191406,-0.031250, -0.062500,
+						0.066406, 0.140625, 0.050781, 1.070312, 0.980469,  0.953125,  1.019531, 0.980469, 1.019531,-0.062500, -0.031250, -0.046875, 0.070312
+                     };*/
+
+uint16_t sample_count = 0;
+
+
+GPS_ACC_INFO_T gps_acc_info[G_VAL_WINDOW_SIZE];
+
+float gps_g_value[G_VAL_WINDOW_SIZE];
+uint16_t gps_speed_value[G_VAL_WINDOW_SIZE];
+
+static const LINE_T line[] = { { '$', '\n'} };
+
+static const uint8_t start_char_array[] = {'$','\0'};
+static const uint8_t end_char_array[] =  {'\n','\0'};
+/* -------------------------------------------------------------------------- */
+/*                 Initialize hardware for GPS interface                      */
+/* -------------------------------------------------------------------------- */
+bool gps_init(uint32_t baud_rate)
+{
+	 FLASH_SETTINGS_T user_settings;
+	 GPS_BAUD_RATES_T gps_baud_rates[]={GPS_BAUD_RATE_4800,
+	    								GPS_BAUD_RATE_9600,
+										GPS_BAUD_RATE_19200,
+										GPS_BAUD_RATE_115200};
+	 int i;
+	 char printBuf[128];
+	 bool success = false;
+
+	 gps_healt_status = FALSE;
+
+	 Chip_IOCON_SetPinMuxing(LPC_IOCON, T2_GpsPortMuxTable, sizeof(T2_GpsPortMuxTable) / sizeof(PINMUX_GRP_T));
+	 Chip_UART_Init(GPS_PORT);
+	 Chip_UART_ConfigData(GPS_PORT, UART_LCR_WLEN8 | UART_LCR_SBS_1BIT | UART_LCR_PARITY_DIS);
+
+	 RingBuffer_Init(&gps_rxring, gps_rxbuff, 1, GPS_UART_RRB_SIZE);
+	 RingBuffer_Init(&gps_txring, gps_txbuff, 1, GPS_UART_SRB_SIZE);
+
+	 settings_read_user_settings(&user_settings);
+
+	 if( baud_rate == 0){
+		 if(user_settings.gps_baud_rate != 0xFFFFFFFF){
+			 Chip_UART_SetBaud(GPS_PORT, user_settings.gps_baud_rate);
+			 Chip_UART_TXEnable(GPS_PORT);
+			 Chip_UART_IntEnable(GPS_PORT, (UART_IER_RBRINT | UART_IER_RLSINT));
+			 NVIC_SetPriority(GPS_IRQ_SELECTION, 1);
+			 NVIC_EnableIRQ(GPS_IRQ_SELECTION);
+			 PRINT_K("\nValid gps baud rate found\n");
+			 success =  true;
+		 }
+		 else{
+			 for(i = 0; i< sizeof(gps_baud_rates)/ sizeof(gps_baud_rates[0]); i++){
+				 Chip_UART_SetBaud(GPS_PORT,gps_baud_rates[i]);
+				 Chip_UART_TXEnable(GPS_PORT);
+				 Chip_UART_IntEnable(GPS_PORT, (UART_IER_RBRINT | UART_IER_RLSINT));
+				 NVIC_SetPriority(GPS_IRQ_SELECTION, 1);
+				 NVIC_EnableIRQ(GPS_IRQ_SELECTION);
+				 Delay(GPS_BAUDRATE_DETECT_DELAY, onIdle);
+				 if(gps_healt_status){
+					 user_settings.gps_baud_rate = gps_baud_rates[i];
+					 UpdateUserSettings(&user_settings);
+					 sprintf(printBuf,"\nDetected baud rate %d:\n",gps_baud_rates[i]);
+					 PRINT_K(printBuf);
+					 success= TRUE;
+				 }
+			 }
+		 }
+	 }
+	 else{
+		 Chip_UART_SetBaud(GPS_PORT, baud_rate);
+		 Chip_UART_TXEnable(GPS_PORT);
+		 Chip_UART_IntEnable(GPS_PORT, (UART_IER_RBRINT | UART_IER_RLSINT));
+	     NVIC_SetPriority(GPS_IRQ_SELECTION, 1);
+		 NVIC_EnableIRQ(GPS_IRQ_SELECTION);
+		 PRINT_K("\nGPS baud rate changed\n");
+		 success =  true;
+	 }
+	EnableGpsPower();
+	PRINT_K("\nGPS initialized\n");
+	return success;
+}
+/* -------------------------------------------------------------------------- */
+/*                 Interrupt handler for GPS UART interface                   */
+/* -------------------------------------------------------------------------- */
+void UART2_IRQHandler(void)
+{
+	Chip_UART_IRQRBHandler(GPS_PORT, &gps_rxring, &gps_txring);
+}
+/*-------------------------------------------------------------------------- */
+void GpsTask()
+{
+	LINE_INFO_T line_info;
+	int i;
+	char gpsRxBuffer[GPS_MESSAGE_BUFFER_SIZE];
+
+
+
+	line_info.p_uart  = GPS_PORT;
+	line_info.p_ringBuffer = &gps_rxring;
+	line_info.p_outBuffer = gpsRxBuffer;
+	line_info.u16_outBufferSize = GPS_MESSAGE_BUFFER_SIZE;
+	line_info.u16_timeout = GPS_DATA_IDLE_TIMEOUT;
+	for(i =0; i < sizeof(line) / sizeof(line[0]); i++){
+		memset(gpsRxBuffer, 0, GPS_MESSAGE_BUFFER_SIZE);
+		line_info.p_line = (LINE_T *)(&line[i]);
+
+
+	/*line_info.p_startCharArray = (char *)start_char_array;
+
+	line_info.p_endCharArray = (char *)end_char_array;*/
+
+
+	if(Get_UartLine(&line_info)){
+		//strcpy(gpsRxBuffer,"$GPRMC,220516,A,5133.82,N,00042.24,W,173.8,231.8,130694,004.2,W*70\r\n");
+		/*PRINT_K("\n***************\n");*/
+	//	PRINT_G(gpsRxBuffer);
+		/*PRINT_K("\n***************\n");*/
+			ProcessGPSMessage(gpsRxBuffer, &nmea_msg_t);
+	}
+	}
+	return;
+}
+/*-------------------------------------------------------------------------- */
+void EnableGpsPower()
+{
+	Chip_GPIO_SetPinState(LPC_GPIO, GPS_PWR_ENABLE_PORT_NUM, GPS_PWR_ENABLE_PIN_NUM, FALSE);
+}
+/*-------------------------------------------------------------------------- */
+uint16_t speed_index =0;
+GPS_POSITION_DATA_T *ProcessGPSMessage(char *gps_msg,  NMEA_MSG_T *nmea_msg_t)
+{
+	G_VALUES_T mma8652_accel_values;
+	ROTATION rotation;
+	static float filtered_gps_g_value = 0;
+	static float filtered_accel_z_value = 0;
+	static float filtered_accel_y_value = 0;
+	static float filtered_accel_x_value = 0;
+	static uint8_t nmea_msg_counter =0;
+	int i;
+	char printBuf[256];
+
+	/*gps_acc_info[sample_count].g = gps_calc_g(sample_speed_data[speed_index]);
+	gps_acc_info[sample_count].speed = sample_speed_data[speed_index];
+	filtered_gps_g_value =  gps_low_pass_filter(gps_acc_info[sample_count].g,
+												filtered_gps_g_value,
+											    ALPHA);
+	gps_acc_info[sample_count].filtered_g = filtered_gps_g_value;
+
+	sprintf(printBuf,"\nHız: %f, G: %f, Filtered G: %f\n", gps_acc_info[sample_count].speed,
+			                                               gps_acc_info[sample_count].g,
+										                   gps_acc_info[sample_count].filtered_g);
+    PRINT_G(printBuf);
+
+	if(speed_index == sizeof(sample_speed_data) / sizeof(sample_speed_data[0]))
+		speed_index =0;
+	else speed_index++;
+
+	check_sudden_acceleration(gps_acc_info,  nmea_msg_t->nmea_msg_items_t.gprmc.speed*1852/1000);
+	check_sudden_deceleration(gps_acc_info,  nmea_msg_t->nmea_msg_items_t.gprmc.speed*1852/1000);
+	if(sample_count < G_VAL_WINDOW_SIZE - 1 )
+	   sample_count++;
+	else{
+		for(i =0; i < G_VAL_WINDOW_SIZE;  i++){
+			gps_acc_info[i] = gps_acc_info[i+1];
+
+		}
+	}
+	return;*/
+	if(!ValidateNMEAChecksum(gps_msg)) {
+
+		return NULL;
+	}
+	else {
+
+		ParseNMEAMessage(gps_msg, nmea_msg_t);
+		switch(nmea_msg_t->type)
+		{
+			case NMEA_TYPE_GPRMC:
+			nmea_msg_counter++;
+			if(nmea_msg_counter == 10){
+				sprintf(printBuf,"\n%s\n",gps_msg);
+				PRINT_K(gps_msg);
+				sprintf(printBuf,"\nGPS mesaji alindi.Uydu Sayisi %d\n",nmea_msg_t->nmea_msg_items_t.gpgga.satellites);
+				PRINT_K(printBuf);
+				nmea_msg_counter =0;
+			}
+			gps_healt_status = TRUE;
+			if(nmea_msg_t->nmea_msg_items_t.gprmc.status == NMEA_GPRMC_VALID){
+				gps_acc_info[sample_count].g = gps_calc_g(nmea_msg_t->nmea_msg_items_t.gprmc.f_speed*1852/1000);
+				gps_acc_info[sample_count].speed = nmea_msg_t->nmea_msg_items_t.gprmc.f_speed*1852/1000;
+		    	/*low -pass filter gps g value */
+				filtered_gps_g_value =  gps_low_pass_filter(gps_acc_info[sample_count].g,
+				 										filtered_gps_g_value,
+				 										ALPHA);
+				gps_acc_info[sample_count].filtered_g = filtered_gps_g_value;
+
+				if((nmea_msg_t->nmea_msg_items_t.gprmc.status == NMEA_GPRMC_VALID) &&
+			       (nmea_msg_t->nmea_msg_items_t.gpgsa.mode2 == NMEA_GPGSA_MODE2_3D) &&
+				   (nmea_msg_t->nmea_msg_items_t.gpgga.position_fix) &&
+				    Get_IgnitionStatus()) {
+					check_sudden_acceleration(gps_acc_info,  nmea_msg_t->nmea_msg_items_t.gprmc.speed*1852/1000);
+					check_sudden_deceleration(gps_acc_info,  nmea_msg_t->nmea_msg_items_t.gprmc.speed*1852/1000);
+
+				}
+				if(sample_count < G_VAL_WINDOW_SIZE- 1 )
+		    	   sample_count++;
+				else{
+					for(i =0; i < G_VAL_WINDOW_SIZE;  i++)
+						gps_acc_info[i] = gps_acc_info[i+1];
+				}
+			}
+			/* keep previous coordinates */
+			if(nmea_msg_t->nmea_msg_items_t.gprmc.status == NMEA_GPRMC_VALID) {
+				gps_set_led_status(TRUE);
+				if(Get_TripGpsStatus() == INVALID_GPS_ON_IGNITION)
+					Init_TripInfo(VALID_GPS_ON_IGNITION);
+
+				current_position.latitude = gps_convert_to_linear_degrees(
+						   &(nmea_msg_t->nmea_msg_items_t.gprmc.coords.latitude),
+						   NMEA_GPS_COORD_NORTH);
+
+				current_position.longitude = gps_convert_to_linear_degrees(
+						   &(nmea_msg_t->nmea_msg_items_t.gprmc.coords.longitude),
+						   NMEA_GPS_COORD_EAST);
+
+
+
+				/* Measure distance between two coordinates */
+				f_distance = gps_calculate_distance(prev_position.latitude,
+											   	   current_position.latitude,
+												   prev_position.longitude,
+											       current_position.longitude);
+
+
+				if(Get_IgnitionStatus() && nmea_msg_t->nmea_msg_items_t.gprmc.speed *1852/1000 > IDLE_SPEED_THRESHOLD){
+					current_position.distance += f_distance;
+					f_kmTempCounter += f_distance;
+				}
+
+			/*	sprintf(printBuf,"\nCurrent distance: %lf, %X\n Temp distance: %d\n", current_position.distance, current_position.distance, (unsigned int)f_kmTempCounter);
+				PRINT_K(printBuf);*/
+
+				if(isKmRecordLimitExceeded())
+					settings_update_km_counter(Get_FlashKmValue() + current_position.distance/1000);
+
+				prev_position = current_position;
+			}
+			else
+				gps_set_led_status(FALSE);
+			break;  /*  end of NMEA_TYPE_GPRMC */
+
+			case NMEA_TYPE_GPGGA:
+			break;
+
+			case NMEA_TYPE_GPGSA:
+			break;
+			/*****/
+		}  /** end of switch statement */
+	}
+	return &current_position;
+}
+/**********************************************************************/
+/*  Validates NMEA message checksum. Returns 1 if chacksum is correct */
+/*  otherwise returns 0                                                */
+/**********************************************************************/
+bool ValidateNMEAChecksum(char *gps_msg)
+{
+	char calcChecksum[3];
+	char nmeaMsgCheckSum[3];
+	const char *n = gps_msg + 1; // Plus one, skip '$'
+	uint8_t chk = 0;
+	char printBuf[256];
+	memset(nmeaMsgCheckSum, 0, sizeof(nmeaMsgCheckSum));
+	memset(calcChecksum, 0, sizeof(calcChecksum));
+//	return true;
+	 /* While current char isn't '*' or sentence ending (newline) */
+	 while ('*' != *n && '\n' != *n) {
+	     if ('\0' == *n || n - gps_msg > GPS_MESSAGE_BUFFER_SIZE) {
+	         /* Sentence too long or short */
+	           return false;
+	     }
+	      chk ^=  *n;
+	      n++;
+	  }
+	 memcpy(nmeaMsgCheckSum, gps_msg + strlen(gps_msg) - 4, 2);
+	 sprintf(calcChecksum,"%X",chk);
+	/* PRINT_K("\n****************************\n");
+	 PRINT_K(nmeaMsgCheckSum);
+	 PRINT_K("\r\n");
+	 PRINT_K(calcChecksum);
+	 PRINT_K("\n****************************\n");*/
+	 if(strlen(calcChecksum) == 1){
+		 calcChecksum[1] = calcChecksum[0];
+		 calcChecksum[0] = '0';
+	 }
+     if(strcmp(calcChecksum ,nmeaMsgCheckSum)== 0)
+    	 return true;
+     else{
+    	PRINT_K(gps_msg);
+    	sprintf(printBuf,"\nGPS checksum failed.Calculated checksum %s, Message checksum %s\n",calcChecksum,nmeaMsgCheckSum);
+    	PRINT_K(printBuf);
+    	return false;
+     }
+
+}
+/*************************************************************************/
+NMEA_STRINGS_T string_cases [] =
+{
+	{ "$GPRMC", nmea_parse_gprmc },
+    { "$GPGGA", nmea_parse_gpgga },
+	{ "$GPGSA", nmea_parse_gpgsa }
+};
+/**********************************************************************/
+void ParseNMEAMessage(char* gps_msg, NMEA_MSG_T *nmea_msg_t)
+{
+	NMEA_STRINGS_T* pCase;
+	char buffer[7];
+	memset(buffer, 0, sizeof(buffer));
+   /* get the nmea message ID */
+	strncpy(buffer, gps_msg, 6);
+
+//	PRINT_K(buffer);
+	nmea_msg_t->type = (enum nmea_data_type)NMEA_TYPE_UNKNOWN;
+    for(pCase = string_cases
+				; pCase != string_cases + sizeof( string_cases ) / sizeof( string_cases[0])
+				; pCase++ ){
+			if(strcmp( pCase->string, buffer) == 0){
+				(*pCase->func)(gps_msg, nmea_msg_t);
+				break;
+			}
+	}
+}
+/********************************************************************
+ Parse sentence until the next comma delimited field.
+ param : buffer  Current location in the NMEA sentence
+*********************************************************************/
+void nmea_parse_next_field(const char **buffer, char seperator)
+{
+	while (NMEA_CURRENT_TOKEN(buffer) != seperator)
+		NMEA_NEXT_TOKEN(buffer);
+
+	NMEA_NEXT_TOKEN(buffer);
+}
+/********************************************************************/
+static bool nmea_parse_gpgsa(const char *buffer, NMEA_MSG_T *data)
+{
+	int32_t temp_int, temp_int2;
+	uint8_t i;
+	char temp_char;
+	bool b_parseSuccess;
+
+	data->type = (enum nmea_data_type)NMEA_TYPE_GPGSA;
+
+	nmea_parse_next_field(&buffer, ',');
+	b_parseSuccess = nmea_parse_character(&buffer, &temp_char);
+	if(b_parseSuccess)
+		data->nmea_msg_items_t.gpgsa.mode1 = temp_char;
+	else
+		return false;
+
+
+	nmea_parse_next_field(&buffer, ',');
+	b_parseSuccess = nmea_parse_int(&buffer, -1, &temp_int);
+	if(b_parseSuccess)
+		data->nmea_msg_items_t.gpgsa.mode2 = temp_int;
+	else
+		return false;
+
+	nmea_parse_next_field(&buffer, ',');
+	for (i = 0; i < sizeof(data->nmea_msg_items_t.gpgsa.satellite) / sizeof(data->nmea_msg_items_t.gpgsa.satellite[0]); i++) {
+	/*	b_parseSuccess = nmea_parse_int(&buffer, -1, &temp_int);
+		if(b_parseSuccess)
+			data->nmea_msg_items_t.gpgsa.satellite[i] = temp_int;
+		else
+			return false;*/
+		nmea_parse_next_field(&buffer, ',');
+	}
+	/*PRINT_K("\nGPGSA processed\n");
+	return true;
+*/
+	b_parseSuccess = nmea_parse_fixed_point(&buffer, &temp_int, &temp_int2);
+	if(b_parseSuccess){
+		data->nmea_msg_items_t.gpgsa.pdop_int = temp_int;
+		data->nmea_msg_items_t.gpgsa.pdop_frac = temp_int2;
+	}
+	else
+		return false;
+
+	nmea_parse_next_field(&buffer, ',');
+	b_parseSuccess = nmea_parse_fixed_point(&buffer, &temp_int, &temp_int2);
+	if(b_parseSuccess){
+		data->nmea_msg_items_t.gpgsa.hdop_int = temp_int;
+		data->nmea_msg_items_t.gpgsa.hdop_frac = temp_int2;
+	}
+	else
+		return false;
+
+	nmea_parse_next_field(&buffer, ',');
+	b_parseSuccess = nmea_parse_fixed_point(&buffer, &temp_int, &temp_int2);
+	if(b_parseSuccess){
+		data->nmea_msg_items_t.gpgsa.vdop_int = temp_int;
+		data->nmea_msg_items_t.gpgsa.vdop_frac = temp_int2;
+	}
+	else
+		return false;
+
+	return b_parseSuccess;
+}
+/*****************************************************************/
+static bool nmea_parse_gprmc(const char *buffer, NMEA_MSG_T * gps_data)
+{
+	bool b_parseSuccess = true;
+	int32_t temp_int;
+	int32_t temp_int2;
+	char temp_char;
+	char printBuf[100];
+
+
+	gps_data->type = (enum nmea_data_type)NMEA_TYPE_GPRMC;
+
+	nmea_parse_next_field(&buffer, ',');
+	b_parseSuccess = nmea_parse_int(&buffer, 2, &temp_int);
+	if(b_parseSuccess)
+		gps_data->nmea_msg_items_t.gprmc.utc_hour = temp_int;
+	else{
+		 PRINT_GPS("Error parsing utc_hour\n");
+		 return false;
+	}
+
+
+	b_parseSuccess = nmea_parse_int(&buffer, 2, &temp_int);
+	if(b_parseSuccess)
+		gps_data->nmea_msg_items_t.gprmc.utc_minute = temp_int;
+	else{
+		 PRINT_GPS("Error parsing utc_minute\n");
+		 return false;
+	}
+
+
+	b_parseSuccess = nmea_parse_int(&buffer, 2, &temp_int);
+	if(b_parseSuccess)
+		gps_data->nmea_msg_items_t.gprmc.utc_second = temp_int;
+	else
+		return false;
+
+	nmea_parse_next_field(&buffer, ',');
+	b_parseSuccess = nmea_parse_character(&buffer, &temp_char);
+	if(b_parseSuccess)
+		gps_data->nmea_msg_items_t.gprmc.status = (NMEA_GPRMC_STATUS_T)temp_char;
+	else
+		return false;
+
+	nmea_parse_next_field(&buffer, ',');
+	b_parseSuccess = nmea_parse_fixed_point(&buffer, &temp_int, &temp_int2);
+	/* parsing latitude */
+	if(b_parseSuccess){
+		gps_data->nmea_msg_items_t.gprmc.coords.latitude.degrees      = temp_int / 100;
+		gps_data->nmea_msg_items_t.gprmc.coords.latitude.minutes      = temp_int % 100;
+		gps_data->nmea_msg_items_t.gprmc.coords.latitude.minutes_frac = temp_int2;
+	}
+	else
+		return false;
+
+	/* parsing latitude*/
+	nmea_parse_next_field(&buffer, ',');
+	b_parseSuccess = nmea_parse_character(&buffer, &temp_char);
+	if(b_parseSuccess)
+		gps_data->nmea_msg_items_t.gprmc.coords.latitude.indicator = (enum nmea_gps_coord_indicator)temp_char;
+	else
+		return false;
+
+    /* parsing Longitude */
+	nmea_parse_next_field(&buffer, ',');
+	b_parseSuccess = nmea_parse_fixed_point(&buffer, &temp_int, &temp_int2);
+	if(b_parseSuccess){
+		gps_data->nmea_msg_items_t.gprmc.coords.longitude.degrees      = temp_int / 100;
+		gps_data->nmea_msg_items_t.gprmc.coords.longitude.minutes      = temp_int % 100;
+		gps_data->nmea_msg_items_t.gprmc.coords.longitude.minutes_frac = temp_int2;
+	}
+	else
+		return false;
+
+	/* parsing longtitude indicator*/
+	nmea_parse_next_field(&buffer, ',');
+	b_parseSuccess = nmea_parse_character(&buffer, &temp_char);
+	if(b_parseSuccess)
+		gps_data->nmea_msg_items_t.gprmc.coords.longitude.indicator = (enum nmea_gps_coord_indicator)temp_char;
+	else
+		return false;
+
+	/* parsing speed*/
+	nmea_parse_next_field(&buffer, ',');
+	b_parseSuccess = nmea_parse_fixed_point(&buffer, &temp_int, &temp_int2);
+	if(b_parseSuccess){
+		gps_data->nmea_msg_items_t.gprmc.speed      = temp_int;
+		gps_data->nmea_msg_items_t.gprmc.speed_frac = temp_int2;
+		if(temp_int2 >=0 && temp_int2 < 10)
+			gps_data->nmea_msg_items_t.gprmc.f_speed = (float)(temp_int * 10 + temp_int2) /10;
+	}
+	else
+		return false;
+
+	/* parsing course over ground*/
+	nmea_parse_next_field(&buffer, ',');
+	b_parseSuccess = nmea_parse_fixed_point(&buffer, &temp_int, &temp_int2);
+	if(b_parseSuccess){
+		gps_data->nmea_msg_items_t.gprmc.course      = temp_int;
+		gps_data->nmea_msg_items_t.gprmc.course_frac = temp_int2;
+	}
+	else
+		return false;
+
+	/* parsing date*/
+	nmea_parse_next_field(&buffer, ',');
+	b_parseSuccess = nmea_parse_int(&buffer, 2, &temp_int);
+	if(b_parseSuccess)
+		gps_data->nmea_msg_items_t.gprmc.day = temp_int;
+	else
+		return false;
+
+	b_parseSuccess = nmea_parse_int(&buffer, 2, &temp_int);
+	if(b_parseSuccess)
+		gps_data->nmea_msg_items_t.gprmc.month = temp_int;
+	else
+		return false;
+
+	b_parseSuccess = nmea_parse_int(&buffer, 2, &temp_int);
+	if(b_parseSuccess)
+		gps_data->nmea_msg_items_t.gprmc.year = temp_int;
+	else
+		return false;
+
+	return b_parseSuccess;
+}
+/****************************************************************************/
+static bool nmea_parse_gpgga(const char *buffer, NMEA_MSG_T * gps_data)
+{
+	bool b_parseSuccess = true;
+	int32_t temp_int;
+	gps_data->type = (enum nmea_data_type)NMEA_TYPE_GPGGA;
+	/* parsing time */
+	nmea_parse_next_field(&buffer, ',');
+
+/*	b_parseSuccess &= nmea_parse_int(&buffer, 2, &temp_int);
+	gps_data->nmea_msg_items_t.gpgga.utc_hour = temp_int;
+	b_parseSuccess &= nmea_parse_int(&buffer, 2, &temp_int);
+	gps_data->nmea_msg_items_t.gpgga.utc_minute = temp_int;
+	b_parseSuccess &= nmea_parse_int(&buffer, 2, &temp_int);
+	gps_data->nmea_msg_items_t.gpgga.utc_second = temp_int;
+*/
+    /* parsing latitude*/
+	nmea_parse_next_field(&buffer, ',');
+
+/*	b_parseSuccess &= nmea_parse_fixed_point(&buffer, &temp_int, &temp_int2);
+	if(b_parseSuccess){
+		gps_data->nmea_msg_items_t.gpgga.coords.latitude.degrees      = temp_int / 100;
+		gps_data->nmea_msg_items_t.gpgga.coords.latitude.minutes      = temp_int % 100;
+		gps_data->nmea_msg_items_t.gpgga.coords.latitude.minutes_frac = temp_int2;
+	}
+*/
+	/* parsing latitude indicator*/
+	nmea_parse_next_field(&buffer, ',');
+
+/*	b_parseSuccess &= nmea_parse_character(&buffer, &temp_char);
+	if(b_parseSuccess)
+		gps_data->nmea_msg_items_t.gpgga.coords.latitude.indicator = (enum nmea_gps_coord_indicator)temp_char;
+*/
+    /* parsing Longitude */
+	nmea_parse_next_field(&buffer, ',');
+
+/*	b_parseSuccess &= nmea_parse_fixed_point(&buffer, &temp_int, &temp_int2);
+	if(b_parseSuccess){
+		gps_data->nmea_msg_items_t.gpgga.coords.longitude.degrees      = temp_int / 100;
+		gps_data->nmea_msg_items_t.gpgga.coords.longitude.minutes      = temp_int % 100;
+		gps_data->nmea_msg_items_t.gpgga.coords.longitude.minutes_frac = temp_int2;
+	}
+*/
+	/* parsing longtitude indicator*/
+	nmea_parse_next_field(&buffer, ',');
+
+/*	b_parseSuccess &= nmea_parse_character(&buffer, &temp_char);
+	if(b_parseSuccess)
+		gps_data->nmea_msg_items_t.gpgga.coords.longitude.indicator = (enum nmea_gps_coord_indicator)temp_char;
+*/
+	/* parsing fix position*/
+	nmea_parse_next_field(&buffer, ',');
+
+	b_parseSuccess &= nmea_parse_int(&buffer, -1, &temp_int);
+	if(b_parseSuccess)
+		gps_data->nmea_msg_items_t.gpgga.position_fix = temp_int;
+	else
+		return false;
+
+	/* parsing number of satellites field*/
+	nmea_parse_next_field(&buffer, ',');
+
+	b_parseSuccess &= nmea_parse_int(&buffer, -1, &temp_int);
+	if(b_parseSuccess)
+		gps_data->nmea_msg_items_t.gpgga.satellites = temp_int;
+	else
+		return false;
+
+	/* Horizontal Dilution Of Precision is not used. Do a dummy read */
+/*	nmea_parse_next_field(&buffer, ',');*/
+
+	/* parsing altitude*/
+/*	nmea_parse_next_field(&buffer, ',');
+
+	b_parseSuccess &= nmea_parse_int(&buffer, 2, &temp_int);
+	if(b_parseSuccess)
+		gps_data->nmea_msg_items_t.gpgga.altitude = temp_int;*/
+
+	return b_parseSuccess;
+}
+/*****************************************************************************/
+/* Parse the current integer field value.
+ *
+ * buffer      [in, out]  Current location in the NMEA sentence
+ * max_length  [in}       Maximum length of the  integer
+ * out         [out]      Location of the parsed integer
+ *
+ * ***************************************************************************/
+static bool nmea_parse_int(const char **buffer, int8_t max_length, int32_t *const out)
+{
+	int32_t parsed_value = 0;
+
+	while (isdigit(NMEA_CURRENT_TOKEN(buffer)) && max_length--) {
+		parsed_value = (parsed_value * 10) + (NMEA_CURRENT_TOKEN(buffer) - '0');
+		NMEA_NEXT_TOKEN(buffer);
+	}
+
+	*out = parsed_value;
+	return true;
+}
+/*****************************************************************************/
+/* Parse the current character field value.
+ *
+ *  buffer [in, out] Current location in the NMEA sentence
+ *  out    [out]     Location of the parsed character
+ *
+ *  return bool  true if the field was parsed successfully.
+ *
+ ***************************************************************************/
+static bool nmea_parse_character(const char **buffer, char *const out)
+{
+	char parsed_char   = '\0';
+	bool b_parseSuccess = false;
+
+	if (isupper(NMEA_CURRENT_TOKEN(buffer))) {
+		parsed_char   = NMEA_CURRENT_TOKEN(buffer);
+		b_parseSuccess = true;
+	}
+//	NMEA_NEXT_TOKEN(buffer);
+
+	*out = parsed_char;
+
+	return b_parseSuccess;
+}
+/***************************************************************************/
+/* Parse the current fixed point X.Y field value.
+ *
+ *  buffer          [in, out]   Current location in the NMEA sentence
+ *  out_whole       [out]       Location of the parsed integer portion
+ *  out_fractional  [out]       Location of the parsed fractional portion
+ *
+ * return bool true if the field was parsed successfully.
+ */
+/***************************************************************************/
+static bool nmea_parse_fixed_point(const char **buffer, int32_t *const out_whole, int32_t *const out_fractional)
+{
+	int32_t parsed_fractional = 0;
+	int32_t parsed_whole      = 0;
+	uint32_t i	              = 0;
+	bool b_parseSuccess       = true;
+
+	b_parseSuccess &= nmea_parse_int(buffer, -1, &parsed_whole);
+
+	if(b_parseSuccess)
+	{
+		if (NMEA_CURRENT_TOKEN(buffer) != '.') {
+			return false;
+		}
+		NMEA_NEXT_TOKEN(buffer);
+
+		for (i = 10; i <= NMEA_FRACTIONAL_SCALER; i *= 10) {
+			if (!isdigit(NMEA_CURRENT_TOKEN(buffer))){
+				break;
+			}
+			else{
+				parsed_fractional *= 10;
+				parsed_fractional += (NMEA_CURRENT_TOKEN(buffer) - '0');
+				NMEA_NEXT_TOKEN(buffer);
+			}
+		}
+
+		if(i == 1000)
+			parsed_fractional /= 10;
+
+		*out_whole      = parsed_whole;
+		*out_fractional = parsed_fractional;
+	}
+	return b_parseSuccess;
+}
+/*****************************************************************************/
+/** Converts a latitude/longitude coordinate from Degrees, Minutes and
+ *  Fractional Minutes to linear number of degrees scaled by
+ *  GPS_POS_DEGREES_SCALER.
+ *
+ *   gps_coord          [in]     Raw DDMM.mmmm coordinate from a GPS module
+ *   positive_indicator [in]     Indicator when the degrees is positive
+ *
+ *  return Input coordinate converted to a scaled number of linear degrees.
+ ******************************************************************************/
+static int32_t gps_convert_to_linear_degrees(
+		       const struct nmea_gps_coord_val *const gps_coord,
+			   const enum nmea_gps_coord_indicator positive_indicator)
+{
+	int32_t new_coordinate;
+	/* Convert raw GPS latitude to linear floating point */
+	new_coordinate  = (gps_coord->degrees) * GPS_POS_DEGREES_SCALER;
+/*	PRINT_K("new_coordinate");
+	itoa(new_coordinate, buffer,10);
+	PRINT_K(buffer);*/
+
+	new_coordinate += (gps_coord->minutes *  GPS_POS_DEGREES_SCALER) / 60;
+/*	PRINT_K("new_coordinate");
+		itoa(new_coordinate, buffer,10);
+		PRINT_K(buffer);*/
+	new_coordinate += (gps_coord->minutes_frac*10) / 60;
+/*	PRINT_K("new_coordinate");
+		itoa(new_coordinate, buffer,10);
+		PRINT_K(buffer);*/
+
+	/* Negate converted coordinate if the orientation is negative */
+	if (gps_coord->indicator != positive_indicator) {
+		new_coordinate = -new_coordinate;
+		}
+
+	return new_coordinate;
+}
+/**********************************************************************************/
+double gps_calculate_distance(int32_t i_prevLat, int32_t i_currLat, int32_t i_prevLon, int32_t i_currLon)
+{
+	double f_temp1 = 0;
+	double f_temp2 = 0;
+	double R = 6371000;	    /* Convert ddMM to degrees*/
+
+	if((i_prevLat == 0) || (i_currLat == 0) || (i_prevLon == 0) || (i_currLon == 0))
+		return 0;
+
+
+	double d_lat = (double)(i_currLat - i_prevLat) * 0.0174532925 / (100000);    /* to radian*/
+	double d_lon = (double)(i_currLon - i_prevLon) * 0.0174532925 / (100000);    /* to radian*/
+
+	f_temp1 = (double)i_currLat * 0.0174532925 / (100000);
+	f_temp2 = (double)i_currLat * 0.0174532925 / (100000);
+
+	double a = sin(d_lat/2) * sin(d_lat/2) + sin(d_lon/2) * sin(d_lon/2) * cos(f_temp1) * cos(f_temp2);
+	double c = 2 * atan2(sqrt(a), sqrt(1-a));
+
+	return (R * c);
+}
+/************************************************************************/
+void gps_get_rmc_info(RMC_MESSAGE_T *rmc_info)
+{
+	memcpy(rmc_info, &nmea_msg_t.nmea_msg_items_t.gprmc, sizeof(RMC_MESSAGE_T));
+}
+/*************************************************************************/
+void gps_get_gsa_info(GSA_MESSAGE_T *gsa_info)
+{
+	*gsa_info = nmea_msg_t.nmea_msg_items_t.gpgsa;
+}
+/*************************************************************************/
+void gps_get_gga_info(GGA_MESSAGE_T *gga_info)
+{
+	*gga_info = nmea_msg_t.nmea_msg_items_t.gpgga;
+}
+/*************************************************************************/
+void gps_get_position_info(GPS_POSITION_DATA_T *const position_info)
+{
+	*position_info = current_position;
+}
+/***************************************************************************/
+void Init_PositionInfo()
+{
+	memset(&current_position, 0, sizeof(current_position));
+	memset(&prev_position, 0, sizeof(prev_position));
+}
+/****************************************************************************/
+void gps_init_info()
+{
+
+/*	memset(gps_rxbuff, 0, GPS_UART_RRB_SIZE);
+	memset(gps_txbuff, 0, GPS_UART_SRB_SIZE);
+	memset(&gps_txring, 0, sizeof(gps_txring));
+	memset(&gps_rxring, 0, sizeof(gps_rxring));
+	memset(&current_position, 0, sizeof(current_position));
+	memset(&prev_position, 0, sizeof(prev_position));
+	memset(&nmea_msg_t, 0 , sizeof(nmea_msg_t));
+	f_kmTempCounter = 0 ;
+	f_distance = 0;*/
+}
+/********************************************************/
+bool isKmRecordLimitExceeded()
+{
+	if(f_kmTempCounter >= FLASH_KM_UPDATE_DISTANCE)
+	{
+		//PRINT_INT((int)f_kmTempCounter);
+		f_kmTempCounter = f_kmTempCounter - FLASH_KM_UPDATE_DISTANCE;
+		return TRUE;
+	}
+	else
+		return FALSE;
+}
+/*********************************************************/
+void gps_send_mtk_command(const char *command)
+{
+	PRINT_K(command);
+	Chip_UART_SendRB(GPS_PORT, &gps_txring, command, strlen(command));
+}
+/********************************************************/
+bool gps_is_moving()
+{
+	NMEA_MSG_T *gps_info = &nmea_msg_t;
+
+	if((gps_info->nmea_msg_items_t.gprmc.speed *1852/1000 > 10) &&
+	   (gps_info->nmea_msg_items_t.gpgga.position_fix) &&
+	   (gps_info->nmea_msg_items_t.gpgga.satellites >= MIN_NUMBER_OF_SATS_FOR_MOVING_NOT_IGNITED))
+		return TRUE;
+	else
+		return FALSE;
+}
+/********************************************************/
+void gps_set_led_status(bool status)
+{
+	Chip_GPIO_SetPinState(LPC_GPIO, P_LED_OK_GPIO_PORT_NUM, P_LED_OK_GPIO_PIN_NUM, status);
+}
+/********************************************************/
+void gps_set_nmea_msg_freq(uint16_t nmea_output_freq)
+{
+
+	PRINT_K("\nSetting NMEA frequency\n");
+	Delay(100,NULL);
+	gps_send_mtk_command("$PMTK251,115200*1F\r\n");    /* set baud rate to 115200 bps */
+	Delay(100,NULL);
+	gps_init(GPS_BAUDRATE_10HZ);
+	gps_send_mtk_command("$PMTK220,100*2F\r\n");        /* set nmea sentence rate to 100 ms*/
+	PRINT_K("Done\n");
+
+}
+/********************************************************/
+float gps_calc_g(float current_speed)
+{
+	static float prev_speed;
+	float gps_g_value;
+
+	gps_g_value = (float)(current_speed - prev_speed)/0.36;
+	prev_speed = current_speed;
+	return gps_g_value;
+}
+/********************************************************/
+float gps_low_pass_filter(float value, float prev_value, float alpha)
+{
+	return alpha*value + (1-alpha)* prev_value;
+}
+/********************************************************/
+float gps_find_max_g()
+{
+	int i;
+	float max_g=0;
+	char printBuf[128];
+
+	for(i =0; i < G_VAL_WINDOW_SIZE; i++){
+		sprintf(printBuf,"%f,",gps_acc_info[i].g);
+	//	PRINT_G(printBuf);
+		if(gps_acc_info[i].g > max_g){
+			max_g = gps_acc_info[i].g;
+		}
+	}
+	return max_g;
+}
+/********************************************************/
+float gps_find_min_g()
+{
+	int i;
+	float min_g=0;
+	char printBuf[128];
+
+	for(i =0; i < G_VAL_WINDOW_SIZE; i++){
+		sprintf(printBuf,"%f,",gps_acc_info[i].g);
+	//	PRINT_G(printBuf);
+		if(gps_acc_info[i].g < min_g){
+			min_g = gps_acc_info[i].g;
+		}
+
+	}
+	return min_g;
+}
+/********************************************************/
+uint16_t gps_find_pos_acc_start()
+{
+	uint16_t i = G_VAL_WINDOW_SIZE;
+	while( i >= 0){
+		if(gps_acc_info[i].filtered_g > gps_acc_info[i- 1].filtered_g)
+			i--;
+		else
+			return gps_acc_info[i].speed;
+	}
+}

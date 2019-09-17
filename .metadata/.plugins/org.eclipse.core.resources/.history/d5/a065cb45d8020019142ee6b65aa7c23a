@@ -1,0 +1,383 @@
+/*
+ * gm_task.c
+ *
+ *  Created on: 27 Eki 2017
+ *      Author: mkurus
+ */
+
+
+#include "chip.h"
+#include "board.h"
+#include "bsp.h"
+#include "gsm.h"
+#include "status.h"
+#include "ProcessTask.h"
+#include "trace.h"
+#include <ctype.h>
+#include <string.h>
+#include <stdlib.h>
+#include "gsm_task.h"
+#include "timer_task.h"
+#include "messages.h"
+
+
+static GsmTask GsmTask_t;
+
+static void PutEventOffline_GsmTask(GSM_TASK_EVENT_T *tEventContainer);
+static bool GetEventOffline_GsmTask(GSM_TASK_EVENT_T *tEventContainer);
+void wrt_gsm_task_event_callback(uint32_t param);
+
+/* Put-Get methods for gsm connected state */
+bool GetEvent_GsmTask(GSM_TASK_EVENT_T *tEvent);
+bool PeekEvent_GsmTask(GSM_TASK_EVENT_T *tEventContainer);
+
+
+
+extern TIMER_ASYNC *lbsQueryTimerId;
+extern char messageBuffer[MAX_T_MESSAGE_SIZE];
+LBS_INFO_T lbs_info;
+/************************************************************/
+bool GetEvent_GsmTask(GSM_TASK_EVENT_T *tEventContainer)
+{
+	if(GsmTask_t.tEventQueue.u8_count){
+
+		tEventContainer->sig = GsmTask_t.tEventQueue.tEventBuffer[GsmTask_t.tEventQueue.u8_readPtr].sig;
+		memcpy(&(tEventContainer->param), &(GsmTask_t.tEventQueue.tEventBuffer[GsmTask_t.tEventQueue.u8_readPtr].param), sizeof(GSM_PARAM_BUFFER_T));
+
+		/* decrement event counter*/
+		GsmTask_t.tEventQueue.u8_count--;
+		/* check if reached end of queue */
+		if (GsmTask_t.tEventQueue.u8_readPtr >= GSM_TASK_EVENT_QUE_SIZE - 1)
+			GsmTask_t.tEventQueue.u8_readPtr = 0;
+		else
+			GsmTask_t.tEventQueue.u8_readPtr++;
+		return true;
+	}
+	else
+		return false;
+}
+/**
+ *
+ */
+static bool GetEventOffline_GsmTask(GSM_TASK_EVENT_T *tEventContainer)
+{
+	if(GsmTask_t.tEventQueue_Offline.u8_count){
+
+		tEventContainer->sig = GsmTask_t.tEventQueue_Offline.tEventBuffer[GsmTask_t.tEventQueue_Offline.u8_readPtr].sig;
+		memcpy(&(tEventContainer->param), &(GsmTask_t.tEventQueue_Offline.tEventBuffer[GsmTask_t.tEventQueue_Offline.u8_readPtr].param), sizeof(GSM_PARAM_BUFFER_T));
+
+		/* decrement event counter*/
+		GsmTask_t.tEventQueue_Offline.u8_count--;
+		/* check if reached end of queue */
+		if (GsmTask_t.tEventQueue_Offline.u8_readPtr >= GSM_TASK_OFFLINE_EVENT_QUE_SIZE - 1)
+			GsmTask_t.tEventQueue_Offline.u8_readPtr = 0;
+		else
+			GsmTask_t.tEventQueue_Offline.u8_readPtr++;
+
+		return true;
+	}
+	else
+		return false;
+}
+/***********************************************************/
+/* Get an event from queue without removing event */
+bool PeekEvent_GsmTask(GSM_TASK_EVENT_T *tEventContainer)
+{
+	static uint8_t readPtr = 0;
+
+	if(GsmTask_t.tEventQueue.u8_count){
+		tEventContainer->sig = GsmTask_t.tEventQueue.tEventBuffer[readPtr].sig;
+		//strcpy(tEventContainer->param, GsmTask_t.tEventQueue.tEventBuffer[readPtr].param);
+		/* decrement event counter*/
+	//	GsmTask_t.tEventQueue.u8_count--;
+		/* check if reached end of queue */
+		if (readPtr >= GSM_TASK_EVENT_QUE_SIZE - 1)
+			readPtr = 0;
+		else
+			readPtr++;
+
+		return true;
+	}
+	else
+		return false;
+}
+/*****************************************************************************/
+void PutEvent_GsmTask(GSM_TASK_EVENT_T *tEventContainer)
+{
+	if(GsmTask_t.tEventQueue.u8_count < GSM_TASK_EVENT_QUE_SIZE){
+		GsmTask_t.tEventQueue.u8_count++;
+
+		GsmTask_t.tEventQueue.tEventBuffer[GsmTask_t.tEventQueue.u8_wrtPtr].sig = tEventContainer->sig;
+		memcpy(&(GsmTask_t.tEventQueue.tEventBuffer[GsmTask_t.tEventQueue.u8_wrtPtr].param), &(tEventContainer->param), sizeof(GSM_PARAM_BUFFER_T));
+
+		if(GsmTask_t.tEventQueue.u8_wrtPtr >= GSM_TASK_EVENT_QUE_SIZE - 1)
+			GsmTask_t.tEventQueue.u8_wrtPtr = 0;
+		else
+			GsmTask_t.tEventQueue.u8_wrtPtr++;
+	}
+	else  /* critical error  */{
+		PRINT_K("\nCannot write event to GsmTask\n");
+		return;
+	}
+
+}
+/**
+ *
+ */
+/*****************************************************************************/
+void PutEvent_GsmTask2(GSM_TASK_EVENT_T *tEventContainer)
+{
+	GSM_TASK_EVENT_T dummy;
+
+	if(GsmTask_t.tEventQueue.u8_count >= GSM_TASK_EVENT_QUE_SIZE){
+		PRINT_K("\nCannot write event to GsmTask\n");
+		GetEvent_GsmTask(&dummy);
+
+	}
+	GsmTask_t.tEventQueue.u8_count++;
+
+	GsmTask_t.tEventQueue.tEventBuffer[GsmTask_t.tEventQueue.u8_wrtPtr].sig = tEventContainer->sig;
+//	strcpy(GsmTask_t.tEventQueue.tEventBuffer[GsmTask_t.tEventQueue.u8_wrtPtr].param1, tEventContainer->param1);
+//	strcpy(GsmTask_t.tEventQueue.tEventBuffer[GsmTask_t.tEventQueue.u8_wrtPtr].param2, tEventContainer->param2);
+
+	if(GsmTask_t.tEventQueue.u8_wrtPtr >= GSM_TASK_EVENT_QUE_SIZE - 1)
+		GsmTask_t.tEventQueue.u8_wrtPtr = 0;
+	else
+		GsmTask_t.tEventQueue.u8_wrtPtr++;
+}
+/**
+ *
+ */
+/*****************************************************************************/
+static void PutEventOffline_GsmTask(GSM_TASK_EVENT_T *tEventContainer)
+{
+	if(GsmTask_t.tEventQueue_Offline.u8_count < GSM_TASK_OFFLINE_EVENT_QUE_SIZE){
+		GsmTask_t.tEventQueue_Offline.u8_count++;
+
+		GsmTask_t.tEventQueue_Offline.tEventBuffer[GsmTask_t.tEventQueue_Offline.u8_wrtPtr].sig = tEventContainer->sig;
+		memcpy(&(GsmTask_t.tEventQueue_Offline.tEventBuffer[GsmTask_t.tEventQueue_Offline.u8_wrtPtr].param), &(tEventContainer->param), sizeof(GSM_PARAM_BUFFER_T));
+
+		if(GsmTask_t.tEventQueue_Offline.u8_wrtPtr >= GSM_TASK_OFFLINE_EVENT_QUE_SIZE - 1)
+			GsmTask_t.tEventQueue_Offline.u8_wrtPtr = 0;
+		else
+			GsmTask_t.tEventQueue_Offline.u8_wrtPtr++;
+	}
+	else  /* critical error  */{
+		PRINT_K("\nCannot write event to GsmTask_Offline\n");
+		return;
+	}
+}
+
+/*******************************************/
+void gsm_task_init()
+{
+	GsmTask_t.tTaskState = GSM_TASK_STATE_NOT_REGISTERED;
+	GsmTask_t.tEventQueue.u8_count = 0;
+	GsmTask_t.tEventQueue.u8_readPtr = 0;
+	GsmTask_t.tEventQueue.u8_wrtPtr = 0;
+	GsmTask_t.tEventQueue_Offline.u8_count = 0;
+	GsmTask_t.tEventQueue_Offline.u8_readPtr = 0;
+	GsmTask_t.tEventQueue_Offline.u8_wrtPtr = 0;
+
+}
+/*******************************************/
+void task_gsm()
+{
+	GSM_TASK_EVENT_T event;
+	static GSM_TASK_SIGNAL_T sig;
+	int16_t i_msgLen;
+
+		switch(GsmTask_t.tTaskState){
+
+			case GSM_TASK_STATE_NOT_REGISTERED:
+
+				if(GetEvent_GsmTask(&event)){
+
+					switch(event.sig){
+						case SIGNAL_GSM_TASK_REGISTERED:
+							if(settings_check_lbs_activation_status()){
+								Timer_Stop(lbsQueryTimerId);
+								Timer_Start(lbsQueryTimerId , TIMER_TYPE_CONTINUOUS, LBS_QUERY_TIMEOUT, wrt_gsm_task_event_callback, SIGNAL_GSM_QUERY_LBS_TICK);
+							}
+							GsmTask_t.tTaskState = GSM_TASK_STATE_REGISTERED;
+							while(GetEventOffline_GsmTask(&event))
+								PutEvent_GsmTask(&event);
+							break;
+
+						case SIGNAL_GSM_TASK_SEND_SMS:
+						//	PRINT_K("\nSIGNAL: SIGNAL_GSM_TASK_SEND_SMS\n");
+							PutEventOffline_GsmTask(&event);
+							break;
+
+						case SIGNAL_GSM_TASK_DIAL:
+						//	PRINT_K("\nSIGNAL: SIGNAL_GSM_TASK_DIAL\n");
+							PutEventOffline_GsmTask(&event);
+							break;
+
+
+						default:
+							break;
+					}
+				}
+
+				break;
+
+			/******/
+			case GSM_TASK_STATE_REGISTERED:
+				if(GetEvent_GsmTask(&event)){
+
+					switch(event.sig){
+
+						case SIGNAL_GSM_TASK_SEND_SMS:
+						//	PRINT_K("\nSIGNAL: GSM_TASK_SEND_SMS\n");
+							gsm_send_sms(event.param.param1, event.param.param2, on_idle);
+							break;
+
+						case SIGNAL_GSM_TASK_DIAL:
+						//	PRINT_K("\nSIGNAL: GSM_TASK_DIAL\n");
+							gsm_dial(event.param.param1, on_idle);
+							break;
+
+						case SIGNAL_GSM_TASK_DEREGISTERED:
+						//	PRINT_K("\nSIGNAL: GSM_TASK_DEREGISTERED\n");
+							GsmTask_t.tTaskState = GSM_TASK_STATE_NOT_REGISTERED;
+							break;
+
+						case SIGNAL_GSM_CONNECTED_SERVER:
+						//	PRINT_K("\nSIGNAL: GSM_CONNECTED_SERVER\n");
+							GsmTask_t.tTaskState = GSM_TASK_STATE_CONNECTED_SERVER;
+							break;
+
+						case SIGNAL_GSM_LBS_ACTIVATED:
+							Timer_Stop( lbsQueryTimerId );
+							Timer_Start( lbsQueryTimerId, TIMER_TYPE_CONTINUOUS, LBS_QUERY_TIMEOUT, wrt_gsm_task_event_callback, SIGNAL_GSM_QUERY_LBS_TICK);
+							break;
+
+						case SIGNAL_GSM_LBS_DEACTIVATED:
+							Timer_Stop(lbsQueryTimerId);
+							break;
+
+						case SIGNAL_GSM_QUERY_LBS_TICK:
+							 gsm_query_lbs_info(&lbs_info);
+							break;
+
+
+						default:
+							break;
+					}
+				break;
+
+			case GSM_TASK_STATE_CONNECTED_SERVER:
+				if(GetEvent_GsmTask(&event)){
+					switch(event.sig){
+
+						case SIGNAL_GSM_TASK_SEND_LORA_MESSAGE:
+						//	PRINT_K("\nSendi");
+							i_msgLen = prepare_t_message(messageBuffer, EXT_TYPE_LORA_MESSAGE, event.param.loraMsgBuf, TRUE);
+							gsm_send_message(messageBuffer, i_msgLen, on_idle);
+							break;
+
+						case SIGNAL_GSM_LBS_ACTIVATED:
+							Timer_Stop(lbsQueryTimerId);
+							Timer_Start(lbsQueryTimerId, TIMER_TYPE_CONTINUOUS, LBS_QUERY_TIMEOUT, wrt_gsm_task_event_callback, SIGNAL_GSM_QUERY_LBS_TICK);
+							break;
+
+						case SIGNAL_GSM_LBS_DEACTIVATED:
+							Timer_Stop(lbsQueryTimerId);
+							break;
+
+						case SIGNAL_GSM_TASK_DEREGISTERED:
+							Timer_Stop(lbsQueryTimerId);
+							//PRINT_K("\nSIGNAL: GSM_TASK_DEREGISTERED\n");
+							GsmTask_t.tTaskState = GSM_TASK_STATE_NOT_REGISTERED;
+							break;
+
+						case SIGNAL_GSM_TASK_SEND_SMS:
+						//	PRINT_K("\nSIGNAL: GSM_TASK_SEND_SMS\n");
+							gsm_send_sms(event.param.param1, event.param.param2, on_idle);
+							break;
+
+						case SIGNAL_GSM_TASK_DIAL:
+							gsm_dial(event.param.param1, on_idle);
+							break;
+
+						case SIGNAL_GSM_QUERY_LBS_TICK:
+							gsm_query_lbs_info(&lbs_info);
+							break;
+
+						case SIGNAL_GSM_DISCONNECTED_SERVER:
+							GsmTask_t.tTaskState = GSM_TASK_STATE_DISCONNECTED_SERVER;
+							break;
+
+
+						default:
+							break;
+
+					}
+				}
+				break;
+
+			case GSM_TASK_STATE_DISCONNECTED_SERVER:
+				if(GetEvent_GsmTask(&event)){
+					switch(event.sig){
+
+
+						case SIGNAL_GSM_CONNECTED_SERVER:
+							/* restart periodic keep-alive timer on connection establishment and change state */
+							/*Timer_Unschedule(keepAliveTimerId);
+							sig = SIGNAL_GSM_TASK_XMIT_KEEPALIVE_MESSAGE;
+							keepAliveTimerId = Timer_Schedule(TIMER_TYPE_CONTINUOUS, KEEP_ALIVE_TIMEOUT, keep_alive_timeout_callback, (void *)&sig);*/
+							GsmTask_t.tTaskState = GSM_TASK_STATE_CONNECTED_SERVER;
+						break;
+
+						case SIGNAL_GSM_LBS_ACTIVATED:
+							Timer_Stop( lbsQueryTimerId );
+							Timer_Start( lbsQueryTimerId, TIMER_TYPE_CONTINUOUS, LBS_QUERY_TIMEOUT, wrt_gsm_task_event_callback, SIGNAL_GSM_QUERY_LBS_TICK);
+							break;
+
+						case SIGNAL_GSM_LBS_DEACTIVATED:
+							Timer_Stop(lbsQueryTimerId);
+							break;
+
+						case SIGNAL_GSM_TASK_DEREGISTERED:
+							Timer_Stop(lbsQueryTimerId);
+							GsmTask_t.tTaskState = GSM_TASK_STATE_NOT_REGISTERED;
+						break;
+
+						case SIGNAL_GSM_SHUTDOWN:
+							gsm_power_off_module();
+							GsmTask_t.tTaskState = GSM_TASK_STATE_INACTIVE;
+							break;
+
+						default:
+							break;
+					}
+				}
+				break;
+
+			case GSM_TASK_STATE_INACTIVE:
+				if(GetEvent_GsmTask(&event)){
+
+				}
+				break;
+			}
+		}
+}
+/**
+ *
+ */
+void wrt_gsm_task_event_callback(uint32_t param)
+{
+	GSM_TASK_EVENT_T gsm_event_t;
+
+	memset(&gsm_event_t, 0, sizeof(GSM_TASK_EVENT_T));
+	gsm_event_t.sig = ((GSM_TASK_SIGNAL_T)param);
+	PutEvent_GsmTask(&gsm_event_t);
+}
+/**
+ * Returns the lbs information
+ */
+void get_lbs_info(LBS_INFO_T* lbs)
+{
+	memcpy(lbs, &lbs_info, sizeof(LBS_INFO_T));
+}

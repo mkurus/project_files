@@ -1,0 +1,185 @@
+/*
+ * lora_task.c
+ *
+ *  Created on: 15 Oca 2018
+ *      Author: mkurus
+ */
+
+#include "chip.h"
+#include "board.h"
+#include "bsp.h"
+#include "timer.h"
+#include "settings.h"
+#include "status.h"
+#include "ProcessTask.h"
+#include "trace.h"
+#include <ctype.h>
+#include <string.h>
+#include <stdlib.h>
+#include "timer_task.h"
+#include "lora_task.h"
+#include "gsm_task.h"
+#include "offline_task.h"
+/**
+ * Function prototypes
+ */
+bool GetEvent_LoraTask(LORA_TASK_EVENT_T *tEvent);
+void buffer_lora_message(char *message);
+void write_gsm_task_lora_event();
+void write_offline_task_lora_event();
+/**
+ * Module scope variables
+ */
+LoraTask LoraTask_t;
+char lora_message_buffer[LORA_MAX_MSG_SIZE * LORA_MAX_MSG_PER_PACKET];
+uint8_t numLoraMessagesBuffered = 0;
+extern TIMER_ASYNC *loraMsgIdleTimer;
+
+/**
+ *
+ */
+bool GetEvent_LoraTask(LORA_TASK_EVENT_T *tEventContainer)
+{
+	if(LoraTask_t.tEventQueue.u8_count){
+
+		tEventContainer->sig = LoraTask_t.tEventQueue.tEventBuffer[LoraTask_t.tEventQueue.u8_readPtr].sig;
+		memcpy(tEventContainer->message, LoraTask_t.tEventQueue.tEventBuffer[LoraTask_t.tEventQueue.u8_readPtr].message, LORA_MAX_MSG_SIZE);
+
+		/* decrement event counter*/
+		LoraTask_t.tEventQueue.u8_count--;
+		/* check if reached end of queue */
+		if (LoraTask_t.tEventQueue.u8_readPtr >= LORA_TASK_EVENT_QUE_SIZE - 1)
+			LoraTask_t.tEventQueue.u8_readPtr = 0;
+		else
+			LoraTask_t.tEventQueue.u8_readPtr++;
+
+		return true;
+	}
+	else
+		return false;
+}
+/**
+ *
+ */
+void PutEvent_LoraTask(LORA_TASK_EVENT_T *tEventContainer)
+{
+	if(LoraTask_t.tEventQueue.u8_count < LORA_TASK_EVENT_QUE_SIZE){
+		LoraTask_t.tEventQueue.u8_count++;
+
+		LoraTask_t.tEventQueue.tEventBuffer[LoraTask_t.tEventQueue.u8_wrtPtr].sig = tEventContainer->sig;
+		memcpy(LoraTask_t.tEventQueue.tEventBuffer[LoraTask_t.tEventQueue.u8_readPtr].message, tEventContainer->message,  LORA_MAX_MSG_SIZE);
+
+		if(LoraTask_t.tEventQueue.u8_wrtPtr >= LORA_TASK_EVENT_QUE_SIZE - 1)
+			LoraTask_t.tEventQueue.u8_wrtPtr = 0;
+		else
+			LoraTask_t.tEventQueue.u8_wrtPtr++;
+	}
+	else  /* critical error  */{
+		PRINT_K("\nCannot write event to LoraTask\n");
+		return;
+	}
+}
+/**
+ *
+ */
+void task_lora()
+{
+	LORA_TASK_EVENT_T eventContainer;
+//	char temp[64];
+
+		if(GetEvent_LoraTask(&eventContainer)){
+
+				switch(eventContainer.sig){
+
+					case SIGNAL_LORA_TASK_MESSAGE_RECEIVED:
+						buffer_lora_message(eventContainer.message);
+						if(numLoraMessagesBuffered == LORA_MAX_MSG_PER_PACKET){
+							Timer_Stop(loraMsgIdleTimer);
+							write_gsm_task_lora_event();
+						//	write_offline_task_lora_event();
+							numLoraMessagesBuffered = 0;
+						}
+						else
+							Timer_Start(loraMsgIdleTimer, TIMER_TYPE_ONE_SHOT, LORA_MSG_DELAY_TIMEOUT,  cbLoraMessageIdleTimeout, SIGNAL_LORA_TASK_MESSAGE_DELAY_TIMEOUT);
+						break;
+
+					case SIGNAL_LORA_TASK_MESSAGE_DELAY_TIMEOUT:
+						PRINT_K("\nSIGNAL: LORA_TASK_MESSAGE_TIMEOUT\n");
+						write_gsm_task_lora_event();
+					//	write_offline_task_lora_event();
+						numLoraMessagesBuffered = 0;
+						break;
+				}
+		}
+}
+/**
+ *
+ */
+void write_gsm_task_lora_event()
+{
+	GSM_TASK_EVENT_T gsm_task_event;
+
+	memset(gsm_task_event.param.loraMsgBuf, 0, sizeof(gsm_task_event.param.loraMsgBuf));
+	gsm_task_event.sig = SIGNAL_GSM_TASK_SEND_LORA_MESSAGE;
+	strcpy(gsm_task_event.param.loraMsgBuf, lora_message_buffer);
+	PutEvent_GsmTask(&gsm_task_event);
+}
+/**
+ *
+ */
+void write_offline_task_lora_event()
+{
+	OFFLINE_TASK_EVENT_T offline_task_event;
+
+	memset(offline_task_event.param.loraMsgBuf, 0, sizeof(offline_task_event.param.loraMsgBuf));
+	offline_task_event.sig = SIGNAL_OFFLINE_TASK_ADD_LORA_MESSAGE;
+	strcpy(offline_task_event.param.loraMsgBuf, lora_message_buffer);
+	PutEvent_OfflineTask(&offline_task_event);
+}
+/**
+ *
+ */
+void lora_task_init()
+{
+	LoraTask_t.tEventQueue.u8_count = 0;
+	LoraTask_t.tEventQueue.u8_readPtr = 0;
+	LoraTask_t.tEventQueue.u8_wrtPtr = 0;
+}
+/**
+ *
+ */
+ void lora_msg_recv_callback(char *buffer, COMMAND_RESPONSE_T *response, const UART_PORT_T *src_port)
+{
+	LORA_TASK_EVENT_T lora_task_event;
+
+	memset(lora_task_event.message, 0, LORA_MAX_MSG_SIZE);
+	lora_task_event.sig = SIGNAL_LORA_TASK_MESSAGE_RECEIVED;
+	memcpy(lora_task_event.message, buffer,  LORA_MAX_MSG_SIZE);
+	PRINT_K("\nLORA message received\n");
+	PutEvent_LoraTask(&lora_task_event);
+
+}
+/**
+ *
+ */
+void cbLoraMessageIdleTimeout(uint32_t param)
+{
+	LORA_TASK_EVENT_T lora_event_t;
+	memset(&lora_event_t, 0, sizeof(LORA_TASK_EVENT_T));
+	lora_event_t.sig = ((LORA_TASK_SIGNAL_T )param);
+	PutEvent_LoraTask(&lora_event_t);
+}
+/**
+ * Adds received LORA message to lora message queue
+ */
+void buffer_lora_message(char *message)
+{
+	if(numLoraMessagesBuffered == 0)
+		memset(lora_message_buffer, 0, sizeof(lora_message_buffer));
+
+	if( (numLoraMessagesBuffered > 0 ) && (numLoraMessagesBuffered < LORA_MAX_MSG_PER_PACKET ))
+		strcat(lora_message_buffer, ",");
+
+	strcat(lora_message_buffer, message);
+	numLoraMessagesBuffered++;
+}

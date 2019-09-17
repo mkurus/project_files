@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<session version="1.0">
+<refactoring comment="Rename resource &apos;T2/src/kora.h&apos; to &apos;lora.h&apos;" description="Rename resource &apos;kora.h&apos;" flags="7" id="org.eclipse.ltk.core.refactoring.rename.resource" input="src/kora.h" name="lora.h" stamp="1509347469908" updateReferences="true"/>
+</session>

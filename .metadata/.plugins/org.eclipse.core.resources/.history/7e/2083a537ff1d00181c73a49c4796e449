@@ -1,0 +1,167 @@
+/*
+ * scale_task.c
+ *
+ *  Created on: 27 Şub 2018
+ *      Author: mkurus
+ */
+
+#include "chip.h"
+#include "board.h"
+#include "bsp.h"
+#include "timer.h"
+#include "settings.h"
+#include "status.h"
+#include "ProcessTask.h"
+#include "trace.h"
+#include <ctype.h>
+#include <string.h>
+#include <stdlib.h>
+#include "din_task.h"
+#include "scale_task.h"
+#include "timer_task.h"
+
+bool GetEvent_ScaleTask(SCALE_TASK_EVENT_T *tEvent);
+void weight_measurement_timeout_callback();
+ScaleTask ScaleTask_t;
+SCALE_TASK_SIGNAL_T sig;
+static int16_t scaleResetTimerId;
+static uint8_t calibSampleCount = 0;
+
+/**
+ *
+ */
+bool GetEvent_ScaleTask(SCALE_TASK_EVENT_T *tEventContainer)
+{
+	if(ScaleTask_t.tEventQueue.u8_count){
+		tEventContainer->sig = ScaleTask_t.tEventQueue.tEventBuffer[ScaleTask_t.tEventQueue.u8_readPtr].sig;
+		tEventContainer->param1 = ScaleTask_t.tEventQueue.tEventBuffer[ScaleTask_t.tEventQueue.u8_readPtr].param1;
+		/* decrement event counter*/
+		ScaleTask_t.tEventQueue.u8_count--;
+		/* check if reached end of queue */
+		if (ScaleTask_t.tEventQueue.u8_readPtr >= SCALE_TASK_EVENT_QUE_SIZE - 1)
+			ScaleTask_t.tEventQueue.u8_readPtr = 0;
+		else
+			ScaleTask_t.tEventQueue.u8_readPtr++;
+
+		return true;
+	}
+	else
+		return false;
+}
+/**
+ *
+ */
+void PutEvent_ScaleTask(SCALE_TASK_EVENT_T *tEventContainer)
+{
+	if(ScaleTask_t.tEventQueue.u8_count < SCALE_TASK_EVENT_QUE_SIZE){
+		ScaleTask_t.tEventQueue.u8_count++;
+
+		ScaleTask_t.tEventQueue.tEventBuffer[ScaleTask_t.tEventQueue.u8_wrtPtr].sig = tEventContainer->sig;
+		ScaleTask_t.tEventQueue.tEventBuffer[ScaleTask_t.tEventQueue.u8_wrtPtr].param1= tEventContainer->param1;
+		if(ScaleTask_t.tEventQueue.u8_wrtPtr >= SCALE_TASK_EVENT_QUE_SIZE - 1)
+			ScaleTask_t.tEventQueue.u8_wrtPtr = 0;
+		else
+			ScaleTask_t.tEventQueue.u8_wrtPtr++;
+	}
+	else  /* critical error  */{
+		PRINT_K("\nCannot write event to ScaleTask\n");
+		return;
+	}
+
+}
+/*******************************************/
+void scale_task_init()
+{
+	ScaleTask_t.tEventQueue.u8_count = 0;
+	ScaleTask_t.tEventQueue.u8_readPtr = 0;
+	ScaleTask_t.tEventQueue.u8_wrtPtr = 0;
+	sig = SIGNAL_SCALE_START_CONVERSION;
+	scaleResetTimerId = Timer_Schedule(TIMER_TYPE_ONE_SHOT, SCALE_RESET_DELAY_TIMEOUT,  weight_measurement_timeout_callback, (void *)&sig);
+}
+/*******************************************/
+void task_scale()
+{
+	SCALE_TASK_EVENT_T event;
+	char printBuf[64];
+	int32_t result;
+
+		if(GetEvent_ScaleTask(&event)){
+			switch(ScaleTask_t.tTaskState){
+
+			case SCALE_CALIBRATED_STATE:
+				switch(event.sig){
+
+					case SIGNAL_SCALE_START_CONVERSION:
+						PRINT_K("\nConversion started\n");
+						hx711_set_clk(false);
+						break;
+
+					case SIGNAL_SCALE_INACTIVATED:
+						PRINT_K("\nScale deactivated\n");
+						scaleResetTimerId = Timer_Schedule(TIMER_TYPE_ONE_SHOT, SCALE_RESET_DELAY_TIMEOUT,  weight_measurement_timeout_callback, (void *)&sig);
+						break;
+
+					case SIGNAL_SCALE_ACTIVATED:
+						PRINT_K("\nScale activated\n");
+						hx711_calc_load(&result);
+						hx711_set_clk(true);
+					break;
+
+					case SIGNAL_SCALE_START_CALIBRATION:
+						if(get_din1_status()) {
+							event.sig = SIGNAL_SCALE_START_CONVERSION;
+							PutEvent_ScaleTask(&event);
+						}
+						else
+							hx711_set_clk(true);
+						PRINT_K("\nStarting Calibration\n");
+						ScaleTask_t.tTaskState = SCALE_CALIBRATE_C_STATE;
+						break;
+				}
+				break;
+
+			case SCALE_CALIBRATE_C_STATE:
+				switch(event.sig){
+
+					case SIGNAL_SCALE_START_CONVERSION:
+						PRINT_K("\nCalibration started\n");
+						hx711_set_clk(false);
+						break;
+
+					case SIGNAL_SCALE_INACTIVATED:
+						PRINT_K("\nScale deactivated\n");
+						scaleResetTimerId = Timer_Schedule(TIMER_TYPE_ONE_SHOT, SCALE_RESET_DELAY_TIMEOUT,  weight_measurement_timeout_callback, (void *)&sig);
+						break;
+
+					case SIGNAL_SCALE_ACTIVATED:
+						PRINT_K("\nScale activated\n");
+						hx711_calc_load(&result);
+						hx711_set_clk(true);
+						calibSampleCount++;
+						sprintf(printBuf, "\nScale value %d\n", (int)result);
+						PRINT_K(printBuf);
+						if(calibSampleCount == SCALE_CALIBRATION_SAMPLE_COUNT){
+							PRINT_K("\nCalibration completed\n");
+						}
+						break;
+
+					case SIGNAL_SCALE_START_CALIBRATION:
+						ScaleTask_t.tTaskState = SCALE_CALIBRATE_C_STATE;
+						break;
+					}
+					break;
+
+
+				break;
+
+			}
+		}
+
+}
+void weight_measurement_timeout_callback(void *param)
+{
+	SCALE_TASK_EVENT_T event;
+	memset(&event, 0, sizeof(SCALE_TASK_EVENT_T));
+	event.sig = *((SCALE_TASK_SIGNAL_T *)param);
+	PutEvent_ScaleTask(&event);
+}

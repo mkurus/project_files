@@ -1,0 +1,63 @@
+/*
+ * gSensor.h
+ *
+ *  Created on: 11 May 2016
+ *      Author: admin
+ */
+
+#ifndef GSENSOR_H_
+#define GSENSOR_H_
+
+#define G_ALARM_QUEUE_SIZE               10
+#define G_SAMPLES_PER_SECS               10
+
+#define MOVING_AVG_WINDOW_SIZE           5
+
+#define SUDDEN_ACC_ANALYZE_BUFFER_SIZE   10
+
+#define G_SAMPLE_BUFFER_SIZE             ((ANALYZE_WINDOW_SECS * G_SAMPLES_PER_SECS))
+#define FILTER_OUTPUT_BUFFER_SIZE        (MOVING_AVG_WINDOW_SIZE * G_SAMPLES_PER_SECS)
+
+#define SUDDEN_ACC_HIGH_THRESHOLD_TICK_COUNT    4  /* threshold for use with moving avregae filter */
+#define SUDDEN_ACC_LOW_THRESHOLD_TICK_COUNT     3
+
+#define SUDDEN_STOP_HIGH_THRESHOLD_TICK_COUNT   5
+#define SUDDEN_STOP_LOW_THRESHOLD_TICK_COUNT    3
+
+
+#define G_EVENT_TIMEOUT                  (2*SECOND)
+
+//#define SUDDEN_ACCL_THRESHOLD_G_VALUE    0.4    /* threshold for use with moving avregae filter */
+#define SUDDEN_ACCL_THRESHOLD_G_VALUE    0,2    /* threshold for use with IIR filter */
+
+#define SUDDEN_STOP_THRESHOLD_G_VALUE   -0.6
+
+typedef struct G_ALARM_INFO_T{
+	bool alarm_exist;
+	char alarm_str[4];
+	uint16_t initial_speed;
+	uint16_t final_speed;
+	uint16_t duration;
+	float  max_g;
+}G_ALARM_INFO;
+
+typedef enum
+{
+	G_BELOW_THRESHOLD,
+	G_OVER_THRESHOLD
+
+}ACC_STATE;
+
+
+bool get_gsensor_alarm_status();
+void get_next_gsensor_alarm(G_ALARM_INFO *sudden_accel_alarm_info);
+bool check_sudden_acceleration(uint16_t speed, uint16_t heading, G_VALUES_T *mma8652_accel_values);
+bool check_sudden_deacceleration(uint16_t speed, uint16_t heading, G_VALUES_T *mma8652_accel_values);
+bool check_xy_acceleration(uint16_t speed, uint16_t heading, G_VALUES_T *mma8652_accel_values);
+bool push_g_alarm(G_ALARM_INFO *g_alarm);
+bool CheckSuddenAccelAlarm(G_VALUES_T *buffer, uint8_t bufferSize, float threshold);
+int8_t get_free_alarm_buffer_index();
+G_VALUES_T MovingAverage(G_VALUES_T *g_value_samples,uint8_t lag);
+void ProcessGValues( G_VALUES_T *g_value_samples);
+void ShiftBuffer(G_VALUES_T *filterOutputBuffer, uint16_t bufferSize);
+#endif /* GSENSOR_H_ */

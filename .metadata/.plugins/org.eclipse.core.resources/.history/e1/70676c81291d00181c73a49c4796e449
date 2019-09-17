@@ -1,0 +1,200 @@
+/*
+ * timer_task.c
+ *
+ *  Created on: 25 Eki 2017
+ *      Author: mkurus
+ */
+
+#include <string.h>
+#include <stdlib.h>
+#include "bsp.h"
+#include "board.h"
+#include "timer.h"
+#include "event.h"
+#include "settings.h"
+#include "trace.h"
+#include "status.h"
+#include "utils.h"
+#include <string.h>
+#include "ProcessTask.h"
+#include "timer_task.h"
+
+
+TIMER_ASYNC timer_info[MAX_NUMBER_OF_TIMERS];
+
+TimerTask tTimerTask;
+
+bool GetEvent_TimerTask(TIMER_TASK_EVENT_T *tEvent);
+void disable_systick_int();
+void enable_systick_int();
+
+void task_timer()
+{
+	TIMER_TASK_EVENT_T tEvent;
+
+ //   void (*func_ptr)(void *);
+
+    if(GetEvent_TimerTask(&tEvent))
+	{
+		switch(tEvent.sig)
+		{
+			case TIMER_TASK_TIMEOUT_SIG:
+				tEvent.callbackPtr(tEvent.param);
+				break;
+
+		/*	case TIMER_TASK_UPDATE_TIMERS_SIG:
+				timer_task_update();
+				break;
+*/
+			default:
+				break;
+		}
+	}
+}
+/*****************************************************************************/
+void PutEvent_TimerTask(TIMER_TASK_EVENT_T *tEventContainer)
+{
+	if(tTimerTask.tEventQueue.byCount < TIMER_TASK_QUEUE_SIZE){
+		tTimerTask.tEventQueue.byCount++;
+
+		tTimerTask.tEventQueue.tEventBuffer[tTimerTask.tEventQueue.byInputPointer].sig = tEventContainer->sig;
+		tTimerTask.tEventQueue.tEventBuffer[tTimerTask.tEventQueue.byInputPointer].callbackPtr = tEventContainer->callbackPtr;
+
+		tTimerTask.tEventQueue.tEventBuffer[tTimerTask.tEventQueue.byInputPointer].param = tEventContainer->param;
+
+		if(tTimerTask.tEventQueue.byInputPointer >= TIMER_TASK_QUEUE_SIZE - 1)
+			tTimerTask.tEventQueue.byInputPointer = 0;
+		else
+			tTimerTask.tEventQueue.byInputPointer++;
+	}
+	else  /* critical error  */
+	return;
+}
+/****************************************************************************/
+bool GetEvent_TimerTask(TIMER_TASK_EVENT_T *tEvent)
+{
+	if(tTimerTask.tEventQueue.byCount){
+		tEvent->sig =tTimerTask.tEventQueue.tEventBuffer[tTimerTask.tEventQueue.byOutputPointer].sig;
+		tEvent->callbackPtr = tTimerTask.tEventQueue.tEventBuffer[tTimerTask.tEventQueue.byOutputPointer].callbackPtr;
+
+		tEvent->param =  tTimerTask.tEventQueue.tEventBuffer[tTimerTask.tEventQueue.byOutputPointer].param;
+
+		/* decrement event counter*/
+		tTimerTask.tEventQueue.byCount--;
+		/* check if reached end of queue */
+		if (tTimerTask.tEventQueue.byOutputPointer >= TIMER_TASK_QUEUE_SIZE - 1)
+			tTimerTask.tEventQueue.byOutputPointer = 0;
+		else
+			tTimerTask.tEventQueue.byOutputPointer++;
+
+		return true;
+	}
+	else
+		return false;
+}
+/****************************************************************************/
+void timer_task_init(void)
+{
+	for(uint8_t i = 0; i < MAX_NUMBER_OF_TIMERS; i++)
+	{
+		timer_info[i].p_callback = NULL;
+		timer_info[i].tick_count = 0;
+		timer_info[i].timer_set_value = 0;  /* used only for continuous timer*/
+		timer_info[i].enabled = false;
+		timer_info[i].timer_id = -1;
+	}
+}
+/*****************************************************************************/
+//bool Set_Timer(uint8_t timer_id, uint8_t timer_type,uint16_t timeout_value, void  *func_ptr_on_timeout(), void * param)
+int16_t Timer_Schedule(uint8_t timer_type, uint16_t timeout_value,  void (*timeout_callback)(void *), void *param)
+{
+	int i;
+
+	disable_systick_int();
+	for(i = 0; i < MAX_NUMBER_OF_TIMERS; i++){
+		if(timer_info[i].enabled == false){
+			timer_info[i].timer_type = timer_type;
+			timer_info[i].p_callback = timeout_callback;
+			timer_info[i].tick_count = timeout_value;
+			timer_info[i].timer_set_value = timeout_value;  /* used only for continuous timer*/
+			timer_info[i].enabled = true;
+			timer_info[i].timer_id = i;
+    		timer_info[i].param = param;
+    		enable_systick_int();
+    		return i;
+		}
+	}
+	enable_systick_int();
+	return -1;
+}
+/********************************************************************/
+void Timer_Unschedule(uint8_t timer_id)
+{
+	if(timer_id >= MAX_NUMBER_OF_TIMERS  || (timer_id < 0) || (timer_info[timer_id].enabled == false))
+		return;
+	disable_systick_int();
+	timer_info[timer_id].enabled = false;
+	timer_info[timer_id].timer_id = -1;
+	enable_systick_int();
+}
+/********************************************************************/
+bool Timer_Reschedule(uint8_t timer_id)
+{
+	char buffer[32];
+	disable_systick_int();
+	sprintf(buffer,"\ntimer_id = %d\n", timer_id);
+	PRINT_K(buffer);
+	if(timer_info[timer_id].enabled == false)
+		return;
+	else
+		timer_info[timer_id].tick_count = timer_info[timer_id].timer_set_value;
+
+	enable_systick_int();
+}
+/********************************************************************/
+/* tick timer interrupt service routine */
+/********************************************************************/
+void timer_task_update()
+{
+	TIMER_TASK_EVENT_T tEventContainer;
+
+
+	for(uint8_t i = 0; i < MAX_NUMBER_OF_TIMERS; i++)
+	{
+		if(timer_info[i]. enabled == true)
+		{
+			if(--timer_info[i].tick_count == 0)
+			{
+				switch(timer_info[i].timer_type)
+				{
+					case TIMER_TYPE_ONE_SHOT:
+					timer_info[i].enabled = false;
+					timer_info[i].timer_id = -1;
+					break;
+
+					case TIMER_TYPE_CONTINUOUS:
+					timer_info[i].enabled = true;
+					timer_info[i].tick_count = timer_info[i].timer_set_value;
+					break;
+				}
+				tEventContainer.callbackPtr = timer_info[i].p_callback;
+				tEventContainer.sig = TIMER_TASK_TIMEOUT_SIG;
+				tEventContainer.param= timer_info[i].param;
+
+				PutEvent_TimerTask(&tEventContainer);
+			}
+		}
+	}
+}
+void disable_systick_int()
+{
+	SysTick->CTRL  = SysTick_CTRL_CLKSOURCE_Msk | SysTick_CTRL_ENABLE_Msk;
+}
+/**
+ *
+ */
+void enable_systick_int()
+{
+	/* Enable SysTick IRQ and SysTick Timer */
+	SysTick->CTRL  = SysTick_CTRL_CLKSOURCE_Msk | SysTick_CTRL_TICKINT_Msk   |  SysTick_CTRL_ENABLE_Msk;
+}

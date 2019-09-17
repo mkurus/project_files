@@ -1,0 +1,33 @@
+/*
+ * rf_node_.h
+ *
+ *  Created on: 23 Eki 2016
+ *      Author: admin
+ */
+
+#ifndef RF_NODE_H_
+#define RF_NODE_H_
+
+
+#define     MAX_NUMBER_OF_NODES                  16
+#define     LE50_SERIAL_NUMBER_SIZE              11
+
+typedef enum APP_ID{
+	APP_ID_DOOR_SENSOR = 1,
+	APP_ID_TEMP_SENSOR,
+	APP_ID_TRAILER_IDENT
+}APP_ID_T;
+
+typedef struct  RF_NODE{
+	char node_id[LE50_SERIAL_NUMBER_SIZE];
+	uint16_t node_number;
+	bool isOk;
+	APP_ID_T app_id;
+}RF_NODE_T;
+
+int  rf_search_node(char *node_id);
+bool rf_add_node(RF_NODE_T * node);
+bool rf_remove_node(char *node_id);
+
+
+#endif /* RF_NODE_H_ */

@@ -1,0 +1,28 @@
+/*
+ * utils.h
+ *
+ *  Created on: 2 Mar 2016
+ *      Author: admin
+ */
+
+#ifndef UTILS_H_
+#define UTILS_H_
+
+uint16_t crc16(char *p_data, uint16_t length);
+int  search_chr(char *token, char s);
+char *remove_chr(char *str, char *charToRemove);
+inline void SetBit(uint32_t *x, uint32_t bitNum);
+inline void ResetBit(uint32_t *x, uint32_t bitNum);
+/* extract bytes out of a word32 */
+#define WORD32_BYTE0(l)    ((uint8_t)(((uint32_t)(l)) & 0x000000FF))
+#define WORD32_BYTE1(l)    ((uint8_t)(((uint32_t)(l) >>  8) & 0x000000FF))
+#define WORD32_BYTE2(l)    ((uint8_t)(((uint32_t)(l) >> 16) & 0x000000FF))
+#define WORD32_BYTE3(l)    ((uint8_t)(((uint32_t)(l) >> 24) & 0x000000FF))
+/* convert 4 bytes to a word32 */
+#define MK_WORD32(A,B,C,D)  ((uint32_t)( ((uint32_t)(A)<<24) | ((uint32_t)(B)<<16) | ((uint32_t)(C)<<8) | (D) ))
+#define MK_WORD16(A,B)      ((uint16_t)( ((uint16_t)(A)<<8) | (B) ))
+
+#define CHAR_STX                     0x02
+#define CHAR_ETX                     0x03
+
+#endif /* UTILS_H_ */

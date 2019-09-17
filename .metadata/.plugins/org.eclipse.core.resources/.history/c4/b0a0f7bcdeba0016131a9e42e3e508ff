@@ -1,0 +1,85 @@
+/*
+ * messages.h
+ *
+ *  Created on: 2 Mar 2016
+ *      Author: admin
+ */
+
+#ifndef MESSAGES_H_
+#define MESSAGES_H_
+
+#ifndef RF_NODE_H_
+#include "rf_node.h"
+#endif
+
+#define  MAX_T_MESSAGE_SIZE    512
+#define  MAX_SPEED_IN_T_MSG    255
+#define  MAX_COURSE_IN_T_MSG   360
+
+#define  P_MSG_START_STR       "[P"
+#define  T_MSG_START_STR       "[T"
+#define  T_MSG_END_STR         "]"
+#define  T_MSG_EXT_BEGIN_STR   "-"
+#define  T_MSG_EXT_SEPERATOR   ";"
+
+typedef enum
+{
+	DIGITAL_INPUT1_DEACTIVATED = 1,
+	DIGITAL_INPUT1_ACTIVATED,
+	DIGITAL_INPUT2_DEACTIVATED,
+	DIGITAL_INPUT2_ACTIVATED,
+	DIGITAL_INPUT3_DEACTIVATED,
+	DIGITAL_INPUT3_ACTIVATED,
+	DIGITAL_INPUT4_DEACTIVATED,
+	DIGITAL_INPUT4_ACTIVATED,
+	DIGITAL_INPUT5_DEACTIVATED,
+	DIGITAL_INPUT5_ACTIVATED,
+	DIGITAL_INPUT6_DEACTIVATED,
+	DIGITAL_INPUT6_ACTIVATED,
+	DIGITAL_INPUT7_DEACTIVATED,
+	DIGITAL_INPUT7_ACTIVATED,
+	DIGITAL_INPUT8_DEACTIVATED,
+	DIGITAL_INPUT8_ACTIVATED,
+	DIGITAL_INPUT9_DEACTIVATED ,
+	DIGITAL_INPUT9_ACTIVATED,
+	DIGITAL_INPUT10_DEACTIVATED,
+	DIGITAL_INPUT10_ACTIVATED,
+	SPEED_LIMIT_VIOLATION,
+	IDLE_TIME_INDICATION,
+	RFID_CARD_READING,
+	CANBUS_DATA,
+	TEMP_SENSOR_DATA,
+	MAX_STOP_TIME_EXCEEDED ,
+	EXT_POWER_STATUS_CHANGE,
+	BATTERY_LEVEL,
+	MAX_IDLE_TIME_EXCEEDED,
+	OFFLINE_DATA,
+	ANALOG_INPUT_READING,
+	GARMIN_NAVIGATION,
+	CELL_ID,
+	IGNITION_DEACTIVATED,
+	IGNITION_ACTIVATED,
+	IGNITION_STATUS_CHANGED,
+	TRIP_INFO,
+	GPS_INFO,
+	ROAMING_DATA,
+	SIM_REMOVED,
+	INTER_MESSAGE_IDLE_TIME,
+	DIGITAL_INPUT_STATUS = 0xA0,
+	SUDDEN_ACCELERATION,
+	COVER_OPENED,
+	RF_NODE_DATA,
+	TRAILER_IDENT,
+} MESSAGE_TYPE_T;
+int32_t PrepareBlockageEchoPacket(char *buffer);
+void Trio_PrepareTMessageExtension(char *u8_tMessage, MESSAGE_TYPE_T message_type);
+void Trio_PrepareRfMessageExtension(char * msgBuffer, RF_NODE_T *node, bool add_comma);
+void Trio_AddTMessageExtensionSeperator(char *bufPtr);
+void Trio_BeginTMessageExtension(char *bufPtr);
+void Trio_BeginTMessage(char *pBuffer);
+void Trio_EndTMessage(char *pBuffer);
+void Trio_StartTripInfoMessage(char *bufPtr);
+int32_t Trio_PreparePingMessage(char *pBuffer, const char *imei_no);
+int32_t Trio_PrepareSTMessage(char *pBuffer, uint16_t bufSize);
+int32_t Trio_PrepareTMessage(char *msgBuffer, bool b_online);
+#endif /* MESSAGES_H_ */

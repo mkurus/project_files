@@ -1,0 +1,251 @@
+#include "chip.h"
+#include "board.h"
+#include "timer.h"
+#include "utils.h"
+#include "trace.h"
+#include "rf_task.h"
+#include "event.h"
+#include "messages.h"
+#include "json_parser.h"
+#include "tablet_app.h"
+#include "msg_parser.h"
+#include <string.h>
+#include <stdlib.h>
+TABLET_APP_EVENT_T *get_free_tablet_event_item();
+
+TABLET_APP_STATE_T tablet_app_state = TABLET_APP_IDLE_STATE;
+TABLET_APP_EVENT_T tablet_app_event_que[TABLET_APP_EVENT_QUE_SIZE];
+bool send_json_sensor_data_over_uart(JSON_TYPE_SENSOR_T *json_canbus, UART_PORT_T *uart_port);
+bool send_json_canbus_over_uart(JSON_TYPE_CANBUS_T *json_canbus, UART_PORT_T *uart_port);
+bool send_json_packet_over_uart(JSON_DATA_INFO_T *json_data, UART_PORT_T *uart_port);
+bool send_json_keepalive_over_uart(UART_PORT_T *uart_port);
+
+TIMER_INFO_T keep_alive_timer;
+TIMER_INFO_T msg_resend_timer;
+typedef struct CANBUS_TAG_MAPPING{
+	char *tagStr;
+	char *buffer;
+}CANBUS_TAG_MAPPING_T;
+
+static char tablet_msg_recv_buffer[TABLET_APP_MSG_SIZE +1];
+/******************************************************/
+void tablet_app_task()
+{
+	TABLET_APP_EVENT_T tablet_app_event;
+	T_MSG_EVENT_T t_msg_event;
+	JSON_DATA_INFO_T json_response_t;
+	static UART_PORT_T *tablet_app_port = NULL;
+
+	memset(&t_msg_event, 0, sizeof(T_MSG_EVENT_T));
+
+	switch(tablet_app_state){
+		case TABLET_APP_IDLE_STATE:
+			if(get_tablet_app_event(&tablet_app_event)){
+				switch(tablet_app_event.event_type){
+					case TYPE_MESSAGE_FROM_TRACKER:
+						PRINT_K("\nReceived event from portal\n");
+						strcpy(json_response_t.json_data.json_type_text.msg_id,
+							   tablet_app_event.json_data_t.json_type_text.msg_id);
+						strcpy(json_response_t.json_data.json_type_text.message,
+							  tablet_app_event.json_data_t.json_type_text.message);
+						strcpy(json_response_t.json_type, "text");
+
+						if(tablet_app_port != NULL)
+							send_json_packet_over_uart(&json_response_t, tablet_app_port);
+
+					/*	strcpy(t_msg_event.msg_type , EVENT_MSG_FROM_TABLET);
+						t_msg_event.p_param = tablet_msg_recv_buffer;
+						put_t_msg_event(&t_msg_event);*/
+						tablet_app_state = TABLET_APP_WAITING_ACK_STATE;
+						Set_Timer(&msg_resend_timer, (3*SECOND));
+
+					break;
+
+					case TYPE_KEEP_ALIVE_REQ:
+					tablet_app_port = tablet_app_event.uart_ptr;
+					send_json_keepalive_over_uart(tablet_app_port);
+					break;
+
+					case TYPE_XMIT_CANBUS_MESSAGE:
+				//	PRINT_K("\nPeriodic CAN message\n");
+					if(tablet_app_port != NULL)
+						send_json_canbus_over_uart(&tablet_app_event.json_data_t.json_type_canbus,tablet_app_port);
+					break;
+
+					case TYPE_XMIT_SENSOR_MESSAGE:
+					PRINT_K("\nPeriodic SENSOR message\n");
+					if(tablet_app_port != NULL)
+						send_json_sensor_data_over_uart(&tablet_app_event.json_data_t.json_type_sensor,tablet_app_port);
+					break;
+				}
+			}
+		break;
+
+		case TABLET_APP_WAITING_ACK_STATE:
+			if(get_tablet_app_event(&tablet_app_event)){
+				switch(tablet_app_event.event_type){
+					case TYPE_ACK_FROM_TABLET:
+						PRINT_K("\nType ACK EVENTTTT\n");
+						tablet_app_state = TABLET_APP_IDLE_STATE;
+					break;
+				}
+			}
+		break;
+	}
+}
+/******************************************************/
+bool send_json_canbus_over_uart(JSON_TYPE_CANBUS_T *json_canbus, UART_PORT_T *uart_port)
+{
+	uint16_t msg_len;
+	char json_tx_buffer[768];
+	int i;
+	CANBUS_TAG_MAPPING_T canbus_tag_mapping_t[] ={
+			{"\"rpm\":\""    			,json_canbus->rpm},
+			{"\"speed\":\""  			,json_canbus->speed},
+			{"\"acc_pedal_pos\":\""   	,json_canbus->acc_pedal_pos},
+			{"\"fuel_level\":\""     	,json_canbus->fuel_level},
+			{"\"total_fuel\":\""     	,json_canbus->total_fuel},
+			{"\"odometer\":\""   	    ,json_canbus->odometer},
+			{"\"amb_temp\":\""          ,json_canbus->amb_temp},
+			{"\"eng_temp\":\""  	    ,json_canbus->eng_temp},
+			{"\"trip_fuel\":\""  	    ,json_canbus->trip_fuel},
+	};
+	memset(json_tx_buffer, 0 ,sizeof(json_tx_buffer));
+
+	json_tx_buffer[0] = TABLET_MSG_START_CHAR;
+	strcat(json_tx_buffer, "{\"type\":\"canbus\",\"content\":{");
+
+	for(i = 0; i < sizeof(canbus_tag_mapping_t) / sizeof(canbus_tag_mapping_t[0]); i++){
+		strcat(json_tx_buffer, canbus_tag_mapping_t[i].tagStr);
+		strcat(json_tx_buffer, canbus_tag_mapping_t[i].buffer);
+		strcat(json_tx_buffer, "\"");
+		if(i < sizeof(canbus_tag_mapping_t) / sizeof(canbus_tag_mapping_t[0]) -1){
+			strcat(json_tx_buffer, ",");
+		}
+	}
+
+	strcat(json_tx_buffer, "}}");
+
+	msg_len = strlen(json_tx_buffer);
+	json_tx_buffer[msg_len] = TABLET_MSG_END_CHAR;
+	Chip_UART_SendRB(uart_port->usart, uart_port->tx_ringbuf, json_tx_buffer, msg_len + 1);
+
+	return TRUE;
+}
+/******************************************************/
+bool send_json_sensor_data_over_uart(JSON_TYPE_SENSOR_T *json_sensor, UART_PORT_T *uart_port)
+{
+	char json_tx_buffer[768];
+	uint8_t sensor_no = 0;
+	RF_NODE_T * nodes_ptr;
+	uint16_t msg_len;
+	char temp[16];
+	int i;
+
+	nodes_ptr = (RF_NODE_T *)json_sensor->ptr_to_rf_node;
+
+	memset(json_tx_buffer, 0 ,sizeof(json_tx_buffer));
+	memset(temp, 0, sizeof(temp));
+
+	json_tx_buffer[0] = TABLET_MSG_START_CHAR;
+
+	strcat(json_tx_buffer, "{\"type\":\"sensor\",\"content\":{");
+
+	for (i= 0; i< MAX_NUMBER_OF_NODES; i++){
+		if(nodes_ptr[i].isAlive){
+			sensor_no++;
+			strcat(json_tx_buffer,"\"sensor ");
+			sprintf(temp,"%d",sensor_no);
+			strcat(json_tx_buffer,temp);
+			strcat(json_tx_buffer,"\":{");
+			strcat(json_tx_buffer,"\"Door 1\":\"");
+			sprintf(temp,"%d",nodes_ptr[i].door_status[0]);
+			strcat(json_tx_buffer,temp);
+			strcat(json_tx_buffer,"\",");
+			strcat(json_tx_buffer,"\"Door 2\":\"");
+			sprintf(temp,"%d",nodes_ptr[i].door_status[1]);
+			strcat(json_tx_buffer,temp);
+			strcat(json_tx_buffer,"\",");
+			strcat(json_tx_buffer,"\"Sicaklik 1\":\"");
+			sprintf(temp,"%d",nodes_ptr[i].ds18b20_channel[0]);
+			strcat(json_tx_buffer,temp);
+			strcat(json_tx_buffer,"\",");
+			strcat(json_tx_buffer,"\"Sicaklik 2\":\"");
+			sprintf(temp,"%d",nodes_ptr[i].ds18b20_channel[1]);
+			strcat(json_tx_buffer,temp);
+			strcat(json_tx_buffer,"\"");
+			strcat(json_tx_buffer,"}");
+		}
+	}
+
+	strcat(json_tx_buffer, "}}");
+	msg_len = strlen(json_tx_buffer);
+	json_tx_buffer[msg_len] = TABLET_MSG_END_CHAR;
+	Chip_UART_SendRB(uart_port->usart, uart_port->tx_ringbuf, json_tx_buffer, msg_len + 1);
+	return TRUE;
+}
+/******************************************************/
+bool send_json_keepalive_over_uart(UART_PORT_T *uart_port)
+{
+	char json_tx_buffer[128];
+
+	strcat(json_tx_buffer, "{\"type\":\"k_a\"}");
+	Chip_UART_SendRB(uart_port->usart, uart_port->tx_ringbuf, json_tx_buffer, strlen(json_tx_buffer));
+	return TRUE;
+}
+/******************************************************/
+bool send_json_packet_over_uart(JSON_DATA_INFO_T *json_data, UART_PORT_T *uart_port)
+{
+	char json_tx_buffer[256];
+	uint16_t msg_len;
+
+	json_tx_buffer[0] = TABLET_MSG_START_CHAR;
+
+	strcat(json_tx_buffer, "{\"type\":\"");
+	strcat(json_tx_buffer, json_data->json_type);
+	strcat(json_tx_buffer,"\",\"content\":{\"msg\":\"");
+	strcat(json_tx_buffer,json_data->json_data.json_type_text.message);
+	strcat(json_tx_buffer,"\",\"id\":\"");
+	strcat(json_tx_buffer,json_data->json_data.json_type_text.msg_id);
+	strcat(json_tx_buffer,"\"}}");
+	msg_len = strlen(json_tx_buffer);
+	json_tx_buffer[msg_len] = TABLET_MSG_END_CHAR;
+	Chip_UART_SendRB(uart_port->usart, uart_port->tx_ringbuf, json_tx_buffer, msg_len + 1);
+	return TRUE;
+}
+/******************************************************/
+bool write_tablet_app_event(TABLET_APP_EVENT_T *tablet_event)
+{
+	TABLET_APP_EVENT_T *temp_event;
+	temp_event = get_free_tablet_event_item();
+	if(temp_event != NULL){
+		memcpy(temp_event, tablet_event, sizeof(TABLET_APP_EVENT_T));
+		return TRUE;
+	}
+	return FALSE;
+}
+/******************************************************/
+TABLET_APP_EVENT_T *get_free_tablet_event_item()
+{
+	int i;
+	for(i=0; i<TABLET_APP_EVENT_QUE_SIZE; i++){
+		if(tablet_app_event_que[i].event_type == TYPE_NULL){
+			return &tablet_app_event_que[i];
+		}
+	}
+	return NULL;
+}
+/******************************************************/
+bool get_tablet_app_event(TABLET_APP_EVENT_T *tablet_event)
+{
+	int i;
+
+	for(i =0 ; i < TABLET_APP_EVENT_QUE_SIZE; i++){
+		if(tablet_app_event_que[i].event_type != TYPE_NULL){
+			memcpy(tablet_event, &tablet_app_event_que[i], sizeof(TABLET_APP_EVENT_T));
+			tablet_app_event_que[i].event_type = TYPE_NULL;
+			return TRUE;
+		}
+	}
+	return FALSE;
+}

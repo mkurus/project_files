@@ -1,0 +1,177 @@
+#include "chip.h"
+#include "board.h"
+#include "timer.h"
+#include "settings.h"
+#include "io_ctrl.h"
+#include "gsm.h"
+#include "trace.h"
+#include "QuectelM95.h"
+
+
+/******************************************/
+
+static const PINMUX_GRP_T iopinmuxing[] = {
+	{EMERG_OFF_PORT_NUM,  EMERG_OFF_BIT_NUM,  IOCON_MODE_INACT | IOCON_FUNC0},
+	{PWRKEY_PORT_NUM,     PWRKEY_BIT_NUM,     IOCON_MODE_INACT | IOCON_FUNC0},
+	{GSM_ENABLE_PORT_NUM, GSM_ENABLE_PIN_NUM, IOCON_MODE_INACT | IOCON_FUNC0},
+	{DIN1_PORT_NUM,       DIN1_PIN_NUM,       IOCON_MODE_INACT | IOCON_FUNC0},
+	{DIN2_PORT_NUM,       DIN2_PIN_NUM,       IOCON_MODE_INACT | IOCON_FUNC0},
+	{DIN3_PORT_NUM,       DIN3_PIN_NUM,       IOCON_MODE_INACT | IOCON_FUNC0},
+	{DIN4_PORT_NUM,       DIN4_PIN_NUM,       IOCON_MODE_INACT | IOCON_FUNC0},
+	{DIN5_PORT_NUM,       DIN5_PIN_NUM,       IOCON_MODE_INACT | IOCON_FUNC0},
+	{DIN6_PORT_NUM,       DIN6_PIN_NUM,       IOCON_MODE_INACT | IOCON_FUNC0},
+	{DIN7_PORT_NUM,       DIN7_PIN_NUM,       IOCON_MODE_INACT | IOCON_FUNC0},
+
+	{DOUT1_GPIO_PORT_NUM,      DOUT1_GPIO_PIN_NUM,      IOCON_MODE_PULLUP | IOCON_FUNC0},
+	{DOUT2_GPIO_PORT_NUM,      DOUT2_GPIO_PIN_NUM,      IOCON_MODE_PULLUP | IOCON_FUNC0},
+	{P_LED_OK_GPIO_PORT_NUM,   P_LED_OK_GPIO_PIN_NUM ,  IOCON_MODE_PULLUP | IOCON_FUNC0},
+//	{P_LED_GPS_GPIO_PORT_NUM,  P_LED_GPS_GPIO_PIN_NUM,  IOCON_MODE_PULLUP | IOCON_FUNC0},
+	{P_ROLE_PORT_NUM ,         P_ROLE_PIN_NUM,          IOCON_MODE_PULLUP | IOCON_FUNC0},
+	{IGN_DETECT_PORT_NUM ,     IGN_DETECT_PIN_NUM,      IOCON_MODE_PULLUP | IOCON_FUNC0},
+	{SIM_DETECT_PORT_NUM,      SIM_DETECT_PIN_NUM,      IOCON_MODE_PULLUP | IOCON_FUNC0},
+	{PWR_DETECT_PORT_NUM,      PWR_DETECT_PIN_NUM,      IOCON_MODE_PULLUP | IOCON_FUNC0},
+	{GPS_PWR_ENABLE_PORT_NUM,  GPS_PWR_ENABLE_PIN_NUM,  IOCON_MODE_PULLUP | IOCON_FUNC0}
+
+};
+/****************************************************************/
+void gpio_init()
+{
+	Chip_GPIO_Init(LPC_GPIO);
+	Chip_IOCON_Init(LPC_IOCON);
+
+	Chip_IOCON_SetPinMuxing(LPC_IOCON, iopinmuxing, sizeof(iopinmuxing) / sizeof(PINMUX_GRP_T));
+
+	Chip_GPIO_SetPinDIROutput(LPC_GPIO, GSM_ENABLE_PORT_NUM,      GSM_ENABLE_PIN_NUM);
+	Chip_GPIO_SetPinDIROutput(LPC_GPIO, EMERG_OFF_PORT_NUM,       EMERG_OFF_BIT_NUM);
+	Chip_GPIO_SetPinDIROutput(LPC_GPIO, PWRKEY_PORT_NUM,          PWRKEY_BIT_NUM);
+	Chip_GPIO_SetPinDIROutput(LPC_GPIO, DOUT1_GPIO_PORT_NUM,      DOUT1_GPIO_PIN_NUM);
+	Chip_GPIO_SetPinDIROutput(LPC_GPIO, DOUT2_GPIO_PORT_NUM,      DOUT2_GPIO_PIN_NUM);
+	Chip_GPIO_SetPinDIROutput(LPC_GPIO, P_LED_OK_GPIO_PORT_NUM,   P_LED_OK_GPIO_PIN_NUM);
+//	Chip_GPIO_SetPinDIROutput(LPC_GPIO, P_LED_GPS_GPIO_PORT_NUM,  P_LED_GPS_GPIO_PIN_NUM);
+	Chip_GPIO_SetPinDIROutput(LPC_GPIO, P_ROLE_PORT_NUM,          P_ROLE_PIN_NUM);
+	Chip_GPIO_SetPinDIROutput(LPC_GPIO, GPS_PWR_ENABLE_PORT_NUM,  GPS_PWR_ENABLE_PIN_NUM);
+
+}
+/****************************************************************/
+void gsm_power_on_module()
+{
+	/*PRINT_K("\nPowering-On Module\n");
+	Chip_GPIO_SetPinState(LPC_GPIO, PWRKEY_PORT_NUM, PWRKEY_BIT_NUM, TRUE);
+	Delay(QUECTEL_M95_POWER_ON_TIME, onIdle);
+	Chip_GPIO_SetPinState(LPC_GPIO, PWRKEY_PORT_NUM, PWRKEY_BIT_NUM, FALSE);*/
+
+	PRINT_K("\nPowering-On Module\n");
+	Chip_GPIO_SetPinState(LPC_GPIO, GSM_ENABLE_PORT_NUM, GSM_ENABLE_PIN_NUM, TRUE);
+}
+/****************************************************************/
+void gsm_power_off_module()
+{
+	/*PRINT_K("\nPowering-Off Module\n");
+	Chip_GPIO_SetPinState(LPC_GPIO, PWRKEY_PORT_NUM, PWRKEY_BIT_NUM, TRUE);
+	Delay(QUECTEL_M95_POWER_OFF_TIME, NULL);
+	Chip_GPIO_SetPinState(LPC_GPIO, PWRKEY_PORT_NUM, PWRKEY_BIT_NUM, FALSE);*/
+
+	PRINT_K("\nPowering-Off Module\n");
+	Chip_GPIO_SetPinState(LPC_GPIO, GSM_ENABLE_PORT_NUM,GSM_ENABLE_PIN_NUM, FALSE);
+}
+/****************************************************************/
+void gsm_turn_on_module()
+{
+	PRINT_K("\nTurning-On Module\n");
+	Chip_GPIO_SetPinState(LPC_GPIO, PWRKEY_PORT_NUM, PWRKEY_BIT_NUM, TRUE);
+	Delay(QUECTEL_M95_POWER_ON_TIME, onIdle);
+	Chip_GPIO_SetPinState(LPC_GPIO, PWRKEY_PORT_NUM, PWRKEY_BIT_NUM, FALSE);
+}
+/****************************************************************/
+void gsm_turn_off_module()
+{
+	PRINT_K("\nPowering-Off Module\n");
+	Chip_GPIO_SetPinState(LPC_GPIO, PWRKEY_PORT_NUM, PWRKEY_BIT_NUM, TRUE);
+	Delay(QUECTEL_M95_POWER_OFF_TIME, NULL);
+	Chip_GPIO_SetPinState(LPC_GPIO, PWRKEY_PORT_NUM, PWRKEY_BIT_NUM, FALSE);
+
+}
+/****************************************************************/
+void gsm_hard_reset()
+{
+	PRINT_K("Module hard reset\n");
+	Chip_GPIO_SetPinState(LPC_GPIO, PWRKEY_PORT_NUM, PWRKEY_BIT_NUM, TRUE);
+	Delay(QUECTEL_M66_HARD_RESET_LOW_TIME, onIdle);
+	/*Chip_GPIO_SetPinState(LPC_GPIO, PWRKEY_PORT_NUM, PWRKEY_BIT_NUM, FALSE);
+	Delay(QUECTEL_M66_WAIT_TIME_AFTER_RESET, onIdle);*/
+}
+/****************************************************************/
+void Gsm_EmergOff()
+{
+	PRINT_K("\nEmergency-Off Gsm module\n");
+	TogglePin(EMERG_OFF_PORT_NUM, EMERG_OFF_BIT_NUM ,QUECTEL_M95_EMERG_OFF_TIME);
+}
+/****************************************************************/
+void TogglePin(uint8_t port_number, uint8_t pin_number, uint16_t duration)
+{
+	Chip_GPIO_SetPinState(LPC_GPIO, port_number, pin_number, FALSE);
+	Delay(duration,NULL);
+	Chip_GPIO_SetPinState(LPC_GPIO, port_number, pin_number, TRUE);
+	Delay(duration,NULL);
+}
+/**********************************************************************************/
+uint16_t Get_UartLine2(LPC_USART_T *uart,
+		              RINGBUFF_T *ringBuffer,
+					  char *outBuffer,  uint16_t buffSize,
+					  char startChar, char endChar, uint16_t timeout)
+{
+	TIMER_INFO_T UartRxTimer;
+	uint16_t u16_charCount = 0;
+	char c_serialChar = 0;
+
+	if(Chip_UART_ReadRB(uart, ringBuffer, &c_serialChar, 1)) {
+		if(c_serialChar == startChar){
+			outBuffer[u16_charCount++] = c_serialChar;
+			Set_Timer(&UartRxTimer, timeout);
+			while(!mn_timer_expired(&UartRxTimer)){
+				if(Chip_UART_ReadRB(uart, ringBuffer, &c_serialChar, 1)){
+					Set_Timer(&UartRxTimer, timeout);
+				/*	if(u16_charCount <= buffSize)*/
+						outBuffer[u16_charCount++] = c_serialChar;
+					if((c_serialChar == endChar) || (u16_charCount >= buffSize))
+						return u16_charCount;
+				}
+			}
+			return 0;
+		}
+	}
+	return 0;
+}
+/***************************************************************/
+uint16_t Get_UartLine(LPC_USART_T *uart,
+		              RINGBUFF_T *ringBuffer,
+					  char *outBuffer,  uint16_t buffSize,
+					  char startChar, char endChar, uint16_t timeout)
+{
+	TIMER_INFO_T UartRxTimer;
+	uint16_t u16_charCount = 0;
+	char c_serialChar = 0;
+    char dummy;
+
+	if(Chip_UART_ReadRB(uart, ringBuffer, &c_serialChar, 1)) {
+		if(uart == LPC_UART3)
+			PRINT_K("\n Char received\n");
+		if(c_serialChar == startChar){
+			outBuffer[u16_charCount++] = c_serialChar;
+			Set_Timer(&UartRxTimer, timeout);
+			while(!mn_timer_expired(&UartRxTimer)){
+				if(Chip_UART_ReadRB(uart, ringBuffer, &c_serialChar, 1)){
+					Set_Timer(&UartRxTimer, timeout);
+					if(u16_charCount <= buffSize)
+						outBuffer[u16_charCount++] = c_serialChar;
+					if((c_serialChar == endChar) || (u16_charCount >= buffSize)){
+						return u16_charCount;
+					}
+
+				}
+			}
+			return 0;
+		}
+	}
+	return 0;
+}

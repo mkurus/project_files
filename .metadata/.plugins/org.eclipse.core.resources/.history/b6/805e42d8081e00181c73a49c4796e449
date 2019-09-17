@@ -1,0 +1,53 @@
+/*
+ * scale_task.h
+ *
+ *  Created on: 27 Şub 2018
+ *      Author: mkurus
+ */
+
+#ifndef SCALE_TASK_H_
+#define SCALE_TASK_H_
+
+#define    SCALE_TASK_EVENT_QUE_SIZE           5
+#define    SCALE_RESET_DELAY_TIMEOUT           100  /* 1 sec delay after reset */
+#define    SCALE_CALIBRATION_SAMPLE_COUNT      10
+/* events processed by scale task */
+typedef enum {
+	SIGNAL_SCALE_ACTIVATED,
+	SIGNAL_SCALE_CALIBRATE_M,
+	SIGNAL_SCALE_CALIBRATE_C,
+	SIGNAL_SCALE_START_CONVERSION,
+	SIGNAL_SCALE_START_CALIBRATION,
+	SIGNAL_SCALE_INACTIVATED,
+}SCALE_TASK_SIGNAL_T;
+
+typedef enum SCALE_TASK_STATE{
+	SCALE_CALIBRATED_STATE,
+	SCALE_CALIBRATE_C_STATE,
+	SCALE_CALIBRATE_M_STATE
+}SCALE_TASK_STATE_T;
+
+/* event structure */
+typedef struct{
+	SCALE_TASK_SIGNAL_T  sig;
+	uint8_t param1;
+}SCALE_TASK_EVENT_T;
+
+typedef struct {
+	uint8_t        u8_wrtPtr;
+	uint8_t        u8_readPtr;
+	uint8_t        u8_count;
+	SCALE_TASK_EVENT_T    tEventBuffer[SCALE_TASK_EVENT_QUE_SIZE];
+}ScaleTaskEventQueue;    // circular event queue
+
+
+typedef struct {
+	SCALE_TASK_STATE_T tTaskState;
+	ScaleTaskEventQueue tEventQueue;
+}ScaleTask;
+
+void PutEvent_ScaleTask(SCALE_TASK_EVENT_T *tEventContainer);
+void scale_task_init();
+void task_scale();
+
+#endif /* SCALE_TASK_H_ */

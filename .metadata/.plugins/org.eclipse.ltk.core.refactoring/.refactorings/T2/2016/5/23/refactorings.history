@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<session version="1.0">
+<refactoring comment="Rename resource &apos;T2/src/MMa8652.c&apos; to &apos;MMA8652.c&apos;" description="Rename resource &apos;MMa8652.c&apos;" flags="7" id="org.eclipse.ltk.core.refactoring.rename.resource" input="src/MMa8652.c" name="MMA8652.c" stamp="1464679442046" updateReferences="true"/>
+</session>

@@ -1,0 +1,43 @@
+/*
+ * ProcessTask.c
+ *
+ *  Created on: 29 Şub 2016
+ *      Author: admin
+ */
+#include "chip.h"
+#include "board.h"
+#include "bsp.h"
+#include "can.h"
+#include "settings.h"
+#include "trace.h"
+#include "timer.h"
+#include "ProcessTask.h"
+#include "MMA8652.h"
+#include "gsm.h"
+#include "adc.h"
+
+#define HEARTBEAT_INTERVAL         (1  * SECOND)
+
+TIMER_INFO_T HEARTBEAT_TIMER1;
+
+void Process_Task(void)
+{
+	uint8_t ctrl_reg1;
+	char printBuf[128];
+	char data[] = {0x40};
+
+	while(1){
+
+    	if(!GsmTask())
+    		break;
+		CAN_Task();
+		GpsTask();
+		StatusTask();
+		OfflineTask();
+		TempSensor1Task();
+		TempSensor2Task();
+		DebugPortTask();
+		Rf_Task();
+	}
+
+}

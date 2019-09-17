@@ -1,0 +1,761 @@
+#include <string.h>
+#include <stdlib.h>
+#include "bsp.h"
+#include "board.h"
+#include "timer.h"
+#include "settings.h"
+#include "gsm.h"
+#include "gps.h"
+#include "adc.h"
+#include "can.h"
+#include "onewire.h"
+#include "MMA8652.h"
+#include "gSensor.h"
+#include "messages.h"
+#include "event.h"
+#include "trace.h"
+#include "status.h"
+#include "rf_task.h"
+
+#include "utils.h"
+
+/* Function prototypes*/
+
+
+void Trio_PrepareTMessageBody(char *pBuffer, bool b_online);
+char * Add_GpsDateTimeInfo(char *buffer, RMC_MESSAGE_T *rmc_info);
+char * Add_GpsCoordinatesInfo(char *bufPtr, RMC_MESSAGE_T *rmc_info);
+char * Add_GpsSpeedInfo(char * bufPtr,  RMC_MESSAGE_T *rmc_info);
+char * Add_GpsCourseInfo(char * bufPtr,  RMC_MESSAGE_T *rmc_info);
+char * Add_GpsEwnsInfo(char * bufPtr,  RMC_MESSAGE_T *rmc_info);
+char get_ewns_code(char latitude, char longtitude);
+
+/****************************************************************************/
+int32_t Trio_PreparePingMessage(char *pBuffer, const char *imei_no)
+{
+	GSM_INFO_T gsm_info;
+
+	Get_GsmInfo(&gsm_info);
+
+	memset(pBuffer, 0, MAX_T_MESSAGE_SIZE);
+
+	strcat(pBuffer, P_MSG_START_STR);
+	strcat(pBuffer, T_MSG_EXT_SEPERATOR);
+	strcat(pBuffer, imei_no);
+	strcat(pBuffer, T_MSG_END_STR);
+
+	return strlen(pBuffer);
+}
+/****************************************************************************/
+/** Fills the message buffer sent by pBuffer parameter and returns
+ *  the number of bytes in formatted message
+ *
+ *  c_buffer  [in out]     buffer for the message
+ *
+ *  return number of bytes in the buffer
+ ******************************************************************************/
+int32_t Trio_PrepareSTMessage(char *pBuffer, uint16_t bufSize)
+{
+	GSM_INFO_T gsm_info;
+	uint32_t resetStatusReg;
+
+	memset(pBuffer, 0, bufSize);
+	Get_GsmInfo(&gsm_info);
+	strcat((char *)pBuffer, "[ST;");
+	strcat((char *)pBuffer, gsm_info.imei_no);
+	strcat((char *)pBuffer, VERSION);
+	strcat((char *)pBuffer, gsm_info.imsi_no);
+	strcat((char *)pBuffer,";");
+	strcat((char *)pBuffer, gsm_info.local_ip);
+	resetStatusReg =  Chip_SYSCTL_GetSystemRSTStatus();
+	Chip_SYSCTL_ClearSystemRSTStatus(resetStatusReg);
+
+	switch(resetStatusReg)
+	{
+		case SYSCTL_RST_POR:
+		strcat(pBuffer, ";PORRST");
+		break;
+
+		case SYSCTL_RST_EXTRST:
+		strcat(pBuffer, ";EXTRST");
+		break;
+
+		case SYSCTL_RST_WDT:
+		strcat(pBuffer, ";WDTRST");
+		break;
+
+		case SYSCTL_RST_BOD:
+		strcat(pBuffer, ";BODRST");
+		break;
+
+		default:
+		strcat(pBuffer, ";RECONNECT");
+		break;
+	}
+	strcat((char *)pBuffer,T_MSG_END_STR);
+
+	return strlen((char *)pBuffer);
+}
+/*****************************************************************************/
+int32_t Trio_PrepareTMessage(char *msgBuffer, bool b_online)
+{
+
+	EVENT_INFO_T event_info;
+	RF_NODE_IN_FLASH_T *rf_node_id_table;
+	RF_NODE_T  node;
+	int index;
+
+	Get_EventInfo(&event_info);
+
+	Trio_BeginTMessage(msgBuffer);
+	Trio_PrepareTMessageBody(msgBuffer, b_online);
+
+	Trio_BeginTMessageExtension(msgBuffer);
+	Trio_PrepareTMessageExtension(msgBuffer, GPS_INFO);
+
+	if(can_get_presence_status()){
+		Trio_AddTMessageExtensionSeperator(msgBuffer);
+		Trio_PrepareTMessageExtension(msgBuffer, CANBUS_DATA);
+	}
+	if(ds18b20_get_presence_status()){
+		Trio_AddTMessageExtensionSeperator(msgBuffer);
+		Trio_PrepareTMessageExtension(msgBuffer, TEMP_SENSOR_DATA);
+	}
+	if(rf_node_get_presence_status()){
+		Trio_AddTMessageExtensionSeperator(msgBuffer);
+		for(i= 0; i< MAX_NUMBER_OF_NODES; i++){
+			 rf_get_node_in_ram(&node, 0);
+			 if(node.isAlive){
+				 index = settings_search_node_in_flash_table(node.node_id);
+				 if(index >= 0)
+					 Trio_PrepareRfMessageExtension(msgBuffer,&node);
+			 }
+		}
+	}
+
+	Trio_AddTMessageExtensionSeperator(msgBuffer);
+	Trio_PrepareTMessageExtension(msgBuffer, ANALOG_INPUT_READING);
+
+	Trio_AddTMessageExtensionSeperator(msgBuffer);
+	Trio_PrepareTMessageExtension(msgBuffer, DIGITAL_INPUT_STATUS);
+
+	if(GetInterMessageIdleTime() > 0){
+		Trio_AddTMessageExtensionSeperator(msgBuffer);
+		Trio_PrepareTMessageExtension(msgBuffer, INTER_MESSAGE_IDLE_TIME);
+		ResetInterMessageIdleTime();
+	}
+
+	if(event_info.diginput_event[0].event_digtial_input_high_to_low){
+		Trio_AddTMessageExtensionSeperator(msgBuffer);
+		Trio_PrepareTMessageExtension(msgBuffer, DIGITAL_INPUT1_ACTIVATED);
+	}
+	if(event_info.diginput_event[0].event_digtial_input_low_to_high){
+		Trio_AddTMessageExtensionSeperator(msgBuffer);
+		Trio_PrepareTMessageExtension(msgBuffer, DIGITAL_INPUT1_DEACTIVATED);
+	}
+
+	if(event_info.diginput_event[1].event_digtial_input_high_to_low){
+		Trio_AddTMessageExtensionSeperator(msgBuffer);
+		Trio_PrepareTMessageExtension(msgBuffer, DIGITAL_INPUT2_ACTIVATED);
+	}
+	if(event_info.diginput_event[1].event_digtial_input_low_to_high){
+		Trio_AddTMessageExtensionSeperator(msgBuffer);
+		Trio_PrepareTMessageExtension(msgBuffer, DIGITAL_INPUT2_DEACTIVATED);
+	}
+
+	if(event_info.diginput_event[2].event_digtial_input_high_to_low){
+		Trio_AddTMessageExtensionSeperator(msgBuffer);
+		Trio_PrepareTMessageExtension(msgBuffer, DIGITAL_INPUT3_ACTIVATED);
+	}
+	if(event_info.diginput_event[2].event_digtial_input_low_to_high){
+		Trio_AddTMessageExtensionSeperator(msgBuffer);
+		Trio_PrepareTMessageExtension(msgBuffer, DIGITAL_INPUT3_DEACTIVATED);
+	}
+
+	if(event_info.diginput_event[3].event_digtial_input_high_to_low){
+		Trio_AddTMessageExtensionSeperator(msgBuffer);
+		Trio_PrepareTMessageExtension(msgBuffer, DIGITAL_INPUT4_ACTIVATED);
+
+	}
+	if(event_info.diginput_event[3].event_digtial_input_low_to_high){
+		Trio_AddTMessageExtensionSeperator(msgBuffer);
+		Trio_PrepareTMessageExtension(msgBuffer, DIGITAL_INPUT4_DEACTIVATED);
+	}
+
+	if(event_info.diginput_event[4].event_digtial_input_high_to_low){
+			Trio_AddTMessageExtensionSeperator(msgBuffer);
+			Trio_PrepareTMessageExtension(msgBuffer, DIGITAL_INPUT5_DEACTIVATED);
+	}
+	if(event_info.diginput_event[4].event_digtial_input_low_to_high){
+			Trio_AddTMessageExtensionSeperator(msgBuffer);
+			Trio_PrepareTMessageExtension(msgBuffer, DIGITAL_INPUT5_ACTIVATED);
+	}
+	if(event_info.diginput_event[5].event_digtial_input_high_to_low){
+			Trio_AddTMessageExtensionSeperator(msgBuffer);
+			Trio_PrepareTMessageExtension(msgBuffer, DIGITAL_INPUT6_DEACTIVATED);
+	}
+
+	if(event_info.diginput_event[5].event_digtial_input_low_to_high){
+			Trio_AddTMessageExtensionSeperator(msgBuffer);
+			Trio_PrepareTMessageExtension(msgBuffer, DIGITAL_INPUT6_ACTIVATED);
+	}
+	if(event_info.event_ignition_changed_on_to_off) {
+	//	PRINT_K("\nAlarm:Ignition status changed\n");
+		Trio_AddTMessageExtensionSeperator(msgBuffer);
+		Trio_PrepareTMessageExtension(msgBuffer, IGNITION_DEACTIVATED);
+		/* trip finished */
+		Trio_AddTMessageExtensionSeperator(msgBuffer);
+		Trio_PrepareTMessageExtension(msgBuffer, TRIP_INFO);
+	}
+	if(event_info.event_ignition_changed_off_to_on) {
+		Trio_AddTMessageExtensionSeperator(msgBuffer);
+		Trio_PrepareTMessageExtension(msgBuffer, IGNITION_ACTIVATED);
+	}
+	if(event_info.event_idle_time_started) {
+	//	PRINT_K("\r\nAlarm: Idle time Started Alarm\r\n");
+		Trio_AddTMessageExtensionSeperator(msgBuffer);
+		Trio_PrepareTMessageExtension(msgBuffer, MAX_IDLE_TIME_EXCEEDED);
+	}
+	if(event_info.event_idle_time_finished) {
+	//	PRINT_K("\r\nAlarm: Idle time finished alarm\r\n");
+		Trio_AddTMessageExtensionSeperator(msgBuffer);
+		Trio_PrepareTMessageExtension(msgBuffer, MAX_IDLE_TIME_EXCEEDED);
+	}
+	if(event_info.event_stop_time_started) {
+	//	PRINT_K("\r\nAlarm: Stop time started\r\n");
+		Trio_AddTMessageExtensionSeperator(msgBuffer);
+	    Trio_PrepareTMessageExtension(msgBuffer, MAX_STOP_TIME_EXCEEDED);
+	}
+	if(event_info.event_stop_time_finished) {
+	//	PRINT_K("\r\nAlarm: Stop time finished\r\n");
+		Trio_AddTMessageExtensionSeperator(msgBuffer);
+		Trio_PrepareTMessageExtension(msgBuffer, MAX_STOP_TIME_EXCEEDED);
+	}
+	if(event_info.event_speed_limit_violation_started) {
+	//	PRINT_K("\r\nAlarm: Speed limit violation started\r\n");
+		Trio_AddTMessageExtensionSeperator(msgBuffer);
+		Trio_PrepareTMessageExtension(msgBuffer, SPEED_LIMIT_VIOLATION);
+	}
+	if(event_info.event_speed_limit_violation_finished) {
+		//PRINT_K("\r\nAlarm: Speed limit violation finished\r\n");
+		Trio_AddTMessageExtensionSeperator(msgBuffer);
+		Trio_PrepareTMessageExtension(msgBuffer, SPEED_LIMIT_VIOLATION);
+	}
+	if(event_info.event_sim_card_removed){
+	//	PRINT_K("\r\nAlarm: SIM card removed\r\n");
+		Trio_AddTMessageExtensionSeperator(msgBuffer);
+		Trio_PrepareTMessageExtension(msgBuffer, SIM_REMOVED);
+	}
+	if(event_info.event_power_status_changed) {
+	//	PRINT_K("\r\nAlarm: Power status changed\r\n");
+		Trio_AddTMessageExtensionSeperator(msgBuffer);
+		Trio_PrepareTMessageExtension(msgBuffer, EXT_POWER_STATUS_CHANGE);
+	}
+
+	if(get_gsensor_alarm_status()){
+		PRINT_K("\nALARM: Sudden Acceleration\n");
+		Trio_AddTMessageExtensionSeperator(msgBuffer);
+		Trio_PrepareTMessageExtension(msgBuffer, SUDDEN_ACCELERATION);
+	}
+
+	if(event_info.event_cover_opened) {
+		PRINT_K("Alarm: Kapak Acildi");
+		Trio_AddTMessageExtensionSeperator(msgBuffer);
+		Trio_PrepareTMessageExtension(msgBuffer, COVER_OPENED);
+	}
+	/* if main power supply is disconnected add power status to T message */
+	if(Get_ExtPowerStatus()){
+		Trio_AddTMessageExtensionSeperator(msgBuffer);
+		Trio_PrepareTMessageExtension(msgBuffer, BATTERY_LEVEL);
+	}
+	Trio_EndTMessage(msgBuffer);
+	Clear_Events();
+
+	return strlen(msgBuffer);
+}
+/***********************************************************/
+void Trio_PrepareTMessageBody(char *msgBuffer, bool b_online)
+{
+	GSM_INFO_T gsm_info;
+	RMC_MESSAGE_T rmc_info;
+	GPS_POSITION_DATA_T position_info;
+	uint32_t u32_km = 0;
+	uint32_t u32_status;
+	float mileage;
+	char buffer2[10];
+	char traceBuf[128];
+
+	Get_GsmInfo(&gsm_info);
+	gps_get_rmc_info(&rmc_info);
+	msgBuffer = strchr(msgBuffer, '\0');
+
+	if(b_online){
+		strcat(msgBuffer, gsm_info.imei_no);
+		msgBuffer = strchr(msgBuffer, '\0');
+	}
+	msgBuffer = Add_GpsDateTimeInfo(msgBuffer, &rmc_info);
+	msgBuffer = Add_GpsCoordinatesInfo(msgBuffer, &rmc_info);
+	msgBuffer = Add_GpsSpeedInfo(msgBuffer, &rmc_info);
+	msgBuffer = Add_GpsCourseInfo(msgBuffer, &rmc_info);
+	msgBuffer = Add_GpsEwnsInfo(msgBuffer, &rmc_info);
+
+	/* insert 2 byte status information */
+     u32_status = GetStatusWord();
+    // u32_status = 0x26;
+     sprintf(buffer2, "%.2X",u32_status);
+     strcat(msgBuffer, buffer2);
+ /*    sprintf(buffer2, "%.1X", WORD32_BYTE0(u32_status));
+     strcat(msgBuffer, buffer2);*/
+   /* (*msgBuffer++) = WORD32_BYTE1(u32_status) + '0';
+    (*msgBuffer++) = WORD32_BYTE0(u32_status) + '0';*/
+
+	gps_get_position_info(&position_info);
+	mileage = position_info.distance / 1000;  /* convert to km */
+	u32_km = Get_FlashKmValue();
+
+	sprintf(traceBuf,"Total km: %f, %d km\n",mileage, u32_km);
+	PRINT_K(traceBuf);
+
+
+	sprintf(buffer2,"%.5X",((uint32_t)mileage + u32_km));
+	strcat(msgBuffer, buffer2);
+
+	 /* signal power*/
+	sprintf(buffer2, "%.2d",gsm_info.csq);
+	strcat(msgBuffer, buffer2);
+}
+/*************************************************************************************
+ * 030:A1
+   A1 => 1010 0001, dig. input 1 aktif, 2 pasif, 3 pasif, 4 pasif, 5 pasif, 6 aktif, 7 pasif, 8 aktif)
+    001:  Dijital giriş 1 aktif değerden pasif değere geçti  **
+    002:  Dijital giriş 1 pasif değerden aktif değere geçti  **
+    003:  Dijital giriş 2 aktif değerden pasif değere geçti  **
+    004:  Dijital giriş 2 pasif değerden aktif değere geçti  **
+    031 : Dijital giriş 3 aktif değerden pasif değere geçti  **
+    032 : Dijital giriş 3 pasif değerden aktif değere geçti  **
+    033 : Dijital giriş 4 aktif değerden pasif değere geçti  **
+    034 : Dijital giriş 4 pasif değerden aktif değere geçti  **
+    035 : Dijital giriş 5 aktif değerden pasif değere geçti  **
+    036 : Dijital giriş 5 pasif değerden aktif değere geçti  **
+    037 : Dijital giriş 6 aktif değerden pasif değere geçti  **
+    038 : Dijital giriş 6 pasif değerden aktif değere geçti  **
+    039 : Dijital giriş 7 aktif değerden pasif değere geçti
+    040 : Dijital giriş 7 pasif değerden aktif değere geçti
+    041 : Dijital giriş 8 aktif değerden pasif değere geçti
+    042 : Dijital giriş 8 pasif değerden aktif değere geçti
+    043 : Dijital giriş 9 aktif değerden pasif değere geçti
+    044 : Dijital giriş 9 pasif değerden aktif değere geçti
+    045 : Dijital giriş 10 aktif değerden pasif değere geçti
+    046 : Dijital giriş 10 pasif değerden aktif değere geçti
+*/
+void Trio_PrepareTMessageExtension(char *u8_tMessage, MESSAGE_TYPE_T message_type)
+{
+	G_ALARM_INFO g_alarm_info;
+	GSA_MESSAGE_T gsa_info;
+	GGA_MESSAGE_T gga_info;
+	EVENT_INFO_T event_info;
+	ONEWIRE_PORT_T onewire_port1;
+	ONEWIRE_PORT_T onewire_port2;
+	uint8_t digInputStatus;
+	char temp[512];
+
+	//Get_StatusInfo(&status_info);
+	Get_EventInfo(&event_info);
+	switch(message_type)
+	{
+
+		case DIGITAL_INPUT1_DEACTIVATED:
+		strcat(u8_tMessage, "001");
+		break;
+
+		case DIGITAL_INPUT1_ACTIVATED:
+		strcat(u8_tMessage, "002");
+		break;
+
+		case DIGITAL_INPUT2_DEACTIVATED:
+		strcat(u8_tMessage, "003");
+		break;
+
+		case DIGITAL_INPUT2_ACTIVATED:
+		strcat(u8_tMessage, "004");
+		break;
+
+		case DIGITAL_INPUT3_DEACTIVATED:
+		strcat(u8_tMessage, "031");
+		break;
+
+		case DIGITAL_INPUT3_ACTIVATED:
+		strcat(u8_tMessage, "032");
+		break;
+
+		case DIGITAL_INPUT4_DEACTIVATED:
+		strcat(u8_tMessage, "033");
+		break;
+
+		case DIGITAL_INPUT4_ACTIVATED:
+		strcat(u8_tMessage, "034");
+		break;
+
+		case DIGITAL_INPUT5_DEACTIVATED:
+		strcat(u8_tMessage, "035");
+		break;
+
+		case DIGITAL_INPUT5_ACTIVATED:
+		strcat(u8_tMessage, "036");
+		break;
+
+		case DIGITAL_INPUT6_DEACTIVATED:
+		strcat(u8_tMessage, "037");
+		break;
+
+		case DIGITAL_INPUT6_ACTIVATED:
+		strcat(u8_tMessage, "038");
+		break;
+
+		case OFFLINE_DATA:
+		strcat(u8_tMessage, "019");
+		break;
+
+		case SUDDEN_ACCELERATION:
+		get_next_gsensor_alarm(&g_alarm_info);
+		strcat(u8_tMessage,g_alarm_info.alarm_str);
+		sprintf(temp,":%d,%d,%d,%f",g_alarm_info.duration,
+									   g_alarm_info.initial_speed,
+									   g_alarm_info.final_speed,
+									   (g_alarm_info.max_g)*1000);
+		strcat(u8_tMessage, temp);
+		PRINT_K("\n**************************\n");
+		PRINT_K(u8_tMessage);
+		PRINT_K("\n**************************\n");
+		break;
+
+		case ANALOG_INPUT_READING:
+		strcat(u8_tMessage, "020:");
+		sprintf(temp,"%d",Get_ADCValue(ADC_CH0));
+		strcat(u8_tMessage, temp);
+		strcat(u8_tMessage, ",");
+		sprintf(temp,"%d",Get_ADCValue(ADC_CH1));
+		strcat(u8_tMessage, temp);
+		break;
+
+		case DIGITAL_INPUT_STATUS:
+		strcat(u8_tMessage, "030:");
+		digInputStatus = GetDigitalInputs();
+		sprintf(temp,"%.2X",digInputStatus);
+		strcat(u8_tMessage, temp);
+		break;
+
+		case TEMP_SENSOR_DATA:
+		Get_TempSensorValue(ONEWIRE_PORT_0, &onewire_port1); // (Get_TempSensor1Value() + 60) *10;//   (ds18b20_read(ONEWIRE_PORT_0) + 60) * 10;
+		Get_TempSensorValue(ONEWIRE_PORT_1, &onewire_port2);// (Get_TempSensor2Value() + 60) *10; //  (ds18b20_read(ONEWIRE_PORT_1) + 60) * 10;
+		strcat(u8_tMessage, "104:");
+		if(onewire_port1.present){
+			int tempInt = (onewire_port1.tempValue +60)*10;
+			sprintf(temp,"%d", tempInt);
+			strcat(u8_tMessage, temp);
+		}
+		if(onewire_port2.present){
+			int tempInt = (onewire_port2.tempValue +60)*10;
+			if(onewire_port1.present)
+				strcat(u8_tMessage, ",");
+			sprintf(temp,"%d", tempInt);
+			strcat(u8_tMessage, temp);
+		}
+		break;
+
+		case COVER_OPENED:
+		strcat(u8_tMessage, "040");
+		break;
+
+		case INTER_MESSAGE_IDLE_TIME:
+		sprintf(temp, "%X", (int)GetInterMessageIdleTime());
+		strcat(u8_tMessage, "00F:");
+		strcat(u8_tMessage, temp);
+		break;
+
+		case  GPS_INFO:
+		/* PARAM 1*/
+		gps_get_gsa_info(&gsa_info);
+		gps_get_gga_info(&gga_info);
+
+		strcat(u8_tMessage, "025:");
+		u8_tMessage = strchr(u8_tMessage, '\0');
+		(*u8_tMessage++) = gsa_info.mode2 + '0';
+		strcat(u8_tMessage, ",");
+
+		/* PARAM 2*/
+		sprintf(temp,"%d",gsa_info.pdop_int);
+		strcat(u8_tMessage, temp);
+		strcat(u8_tMessage, ".");
+		sprintf(temp,"%d",gsa_info.pdop_frac);
+		strcat(u8_tMessage, temp);
+		strcat(u8_tMessage, ",");
+
+		/* PARAM 3*/
+		sprintf(temp,"%d",gsa_info.hdop_int);
+		strcat(u8_tMessage, temp);
+		strcat(u8_tMessage, ".");
+		sprintf(temp,"%d",gsa_info.hdop_frac);
+		strcat(u8_tMessage, temp);
+		strcat(u8_tMessage, ",");
+
+		/* PARAM 4*/
+		sprintf(temp,"%d",gsa_info.vdop_int);
+		strcat(u8_tMessage, temp);
+		strcat(u8_tMessage, ".");
+		sprintf(temp,"%d",gsa_info.vdop_frac);
+		strcat(u8_tMessage, temp);
+		strcat(u8_tMessage, ",");
+
+		/* PARAM 5 */
+		sprintf(temp,"%d",gga_info.satellites);
+		strcat(u8_tMessage, temp);
+		break;
+
+		case MAX_IDLE_TIME_EXCEEDED:
+		strcat(u8_tMessage, "00X");
+		if(event_info.event_idle_time_finished){
+			strcat(u8_tMessage, ":");
+			sprintf(temp,"%X",(int)GetTotalIdleTime());
+			ResetTotalIdleTime();
+			strcat(u8_tMessage, temp);
+		}
+		break;
+
+		case MAX_STOP_TIME_EXCEEDED:
+		strcat(u8_tMessage, "00C");
+		if(event_info.event_stop_time_finished){
+			strcat(u8_tMessage, ":");
+			sprintf(temp,"%X",(int)GetStopTime());
+			ResetStopTime();
+			strcat(u8_tMessage, temp);
+		}
+		break;
+
+		case SPEED_LIMIT_VIOLATION:
+		strcat(u8_tMessage, "005:");
+		if(event_info.event_speed_limit_violation_finished){
+			strcat(u8_tMessage, "0,");
+			sprintf(temp,"%X",(int)GetSpeedViolationDuration());
+			ResetSpeedViolationTime();
+			strcat(u8_tMessage, temp);
+		}
+		else
+			strcat(u8_tMessage, "1");
+		break;
+
+		case SIM_REMOVED:
+		strcat(u8_tMessage, "027");
+		break;
+
+		case EXT_POWER_STATUS_CHANGE:
+		if(!Get_ExtPowerStatus())
+			strcat(u8_tMessage, "00D:1");
+		else
+			strcat(u8_tMessage, "00D:0");
+		break;
+
+		case IGNITION_ACTIVATED:
+		strcat(u8_tMessage, "024:1");
+		break;
+
+		case IGNITION_DEACTIVATED:
+		strcat(u8_tMessage, "024:0");
+	    break;
+
+		case CANBUS_DATA:
+		strcat(u8_tMessage, "008:");
+		Get_CanMessageString(temp, sizeof(temp));
+		strcat(u8_tMessage, temp);
+		break;
+
+		case TRIP_INFO:
+		strcat(u8_tMessage, "026:");
+		strcat(u8_tMessage, Get_TripStartInfoBufferPtr());   /* PARAM 1*/
+		strcat(u8_tMessage, ",");
+		sprintf(temp, "%d", (int)Get_TripDistance());    /* PARAM 2*/
+		strcat(u8_tMessage, temp);
+		strcat(u8_tMessage, ",0,");                          /* PARAM 3 ignored */
+		sprintf(temp,"%d", (int)Get_TripIdleTime());     /* PARAM 4  */
+		strcat(u8_tMessage, temp);
+		break;
+
+		case BATTERY_LEVEL:
+		strcat(u8_tMessage, "00E:");
+		sprintf(temp, "%d",GetBatteryVoltage());
+		strcat(u8_tMessage, temp);
+		break;
+
+	}
+}
+/*****************************************************************/
+void Trio_PrepareRfMessageExtension(char *u8_tMessage, RF_NODE_T *node)
+{
+	char buffer[16];
+	strcat(u8_tMessage,node->node_id);
+	strcat(u8_tMessage, ",");
+	sprintf(buffer,"%d,%d,",node->ds18b20_channel[0],node->ds18b20_channel[1]);
+	strcat(u8_tMessage, buffer);
+
+	if(node->door_status[0])
+		strcat(u8_tMessage, "1,");
+	else
+		strcat(u8_tMessage, "0,");
+
+	if(node->door_status[1])
+		strcat(u8_tMessage, "1,");
+	else
+		strcat(u8_tMessage, "0,");
+
+	sprintf(buffer,"%d,",node->bat_voltage);
+	strcat(u8_tMessage, buffer);
+
+	sprintf(buffer,"%d",node->rssi);
+	strcat(u8_tMessage, buffer);
+
+}
+/*****************************************************************/
+void PrepareCanDataString(char *temp)
+{
+
+}
+/*****************************************************************/
+void Trio_BeginTMessageExtension(char *bufPtr)
+{
+	strcat(bufPtr, T_MSG_EXT_BEGIN_STR);
+	bufPtr++;
+}
+/*************************************************************/
+void Trio_AddTMessageExtensionSeperator(char *bufPtr)
+{
+	strcat(bufPtr, T_MSG_EXT_SEPERATOR);
+	bufPtr++;
+}
+/*****************************************************************/
+char *Add_GpsDateTimeInfo(char *bufPtr, RMC_MESSAGE_T *rmc_info)
+{
+	/* date*/
+	(*bufPtr++) = (rmc_info->day/10)   + '0';
+	(*bufPtr++) = (rmc_info->day%10)   + '0';
+	(*bufPtr++) = (rmc_info->month/10) + '0';
+	(*bufPtr++) = (rmc_info->month%10) + '0';
+	(*bufPtr++) = (rmc_info->year/10)  + '0';
+	(*bufPtr++) = (rmc_info->year%10)  + '0';
+
+	/* time */
+	(*bufPtr++) =  (rmc_info->utc_hour/10)   + '0';
+	(*bufPtr++) =  (rmc_info->utc_hour%10)   + '0';
+	(*bufPtr++) =  (rmc_info->utc_minute/10) + '0';
+	(*bufPtr++) =  (rmc_info->utc_minute%10) + '0';
+	(*bufPtr++) =  (rmc_info->utc_second/10) + '0';
+	(*bufPtr++) =  (rmc_info->utc_second%10) + '0';
+
+	return bufPtr;
+}
+/*********************************************************************************/
+char * Add_GpsCoordinatesInfo(char *bufPtr, RMC_MESSAGE_T *rmc_info)
+{
+	/* latitude */
+	(*bufPtr++) = (rmc_info->coords.latitude.degrees /10)   + '0';
+	(*bufPtr++) = (rmc_info->coords.latitude.degrees %10)   + '0';
+	(*bufPtr++) = (rmc_info->coords.latitude.minutes /10)   + '0';
+	(*bufPtr++) = (rmc_info->coords.latitude.minutes %10)   + '0';
+
+	(*bufPtr++) =  (rmc_info->coords.latitude.minutes_frac /1000)       + '0';
+	(*bufPtr++) =  (rmc_info->coords.latitude.minutes_frac %1000 /100)  + '0';
+	(*bufPtr++) =  (rmc_info->coords.latitude.minutes_frac %100)/10     + '0';
+	(*bufPtr++) =  (rmc_info->coords.latitude.minutes_frac %10)         + '0';
+
+	/* longitude */
+	(*bufPtr++) = (rmc_info->coords.longitude.degrees /100)      + '0';
+	(*bufPtr++) = (rmc_info->coords.longitude.degrees %100) /10  + '0';
+	(*bufPtr++) = (rmc_info->coords.longitude.degrees %10)       + '0';
+	(*bufPtr++) = (rmc_info->coords.longitude.minutes /10)       + '0';
+	(*bufPtr++) = (rmc_info->coords.longitude.minutes %10)       + '0';
+
+	(*bufPtr++) = (rmc_info->coords.longitude.minutes_frac /1000)       + '0';
+	(*bufPtr++) = (rmc_info->coords.longitude.minutes_frac %1000) /100  + '0';
+	(*bufPtr++) = (rmc_info->coords.longitude.minutes_frac %100)/10     + '0';
+	(*bufPtr++) = (rmc_info->coords.longitude.minutes_frac %10)         + '0';
+
+	return bufPtr;
+}
+/*************************************************************************************/
+char *Add_GpsSpeedInfo(char *bufPtr,  RMC_MESSAGE_T *rmc_info)
+{
+	uint16_t u16_speedKm;
+	char buffer[16];
+
+	memset(buffer, 0, sizeof(buffer));
+
+	u16_speedKm = rmc_info->speed*1852/1000;
+
+	if(u16_speedKm >  MAX_SPEED_IN_T_MSG)
+		u16_speedKm = MAX_SPEED_IN_T_MSG;
+
+	sprintf(buffer,"%.2X",u16_speedKm);
+	strcat(bufPtr, buffer);
+	/*Hex2Str(buffer, u32_speedKm);
+	strcat(bufPtr, &buffer[6]);*/
+	return bufPtr;
+}
+/*************************************************************************************/
+char *Add_GpsCourseInfo(char *bufPtr,  RMC_MESSAGE_T *rmc_info)
+{
+	char buffer[16];
+
+	memset(buffer, 0, sizeof(buffer));
+
+	if(rmc_info->course >  MAX_COURSE_IN_T_MSG)
+		rmc_info->course = MAX_COURSE_IN_T_MSG;
+
+	sprintf(buffer,"%.3X",rmc_info->course);
+	strcat(bufPtr, buffer);
+
+	/*Hex2Str(buffer,rmc_info->course);
+	strcat(bufPtr, &buffer[5]);*/
+
+	bufPtr = strchr(bufPtr, '\0');
+
+	return bufPtr;
+}
+/***********************************************************************************/
+void Trio_StartTripInfoMessage(char *bufPtr)
+{
+	RMC_MESSAGE_T rmc_info;
+	gps_get_rmc_info(&rmc_info);
+
+	bufPtr = Add_GpsDateTimeInfo(bufPtr, &rmc_info);
+	bufPtr = Add_GpsCoordinatesInfo(bufPtr, &rmc_info);
+	bufPtr = Add_GpsSpeedInfo(bufPtr, &rmc_info);
+	bufPtr = Add_GpsCourseInfo(bufPtr, &rmc_info);
+	bufPtr = Add_GpsEwnsInfo(bufPtr, &rmc_info);
+}
+/*********************************************************************/
+char * Add_GpsEwnsInfo(char *bufPtr,  RMC_MESSAGE_T *rmc_info)
+{
+	(*bufPtr++) = get_ewns_code(rmc_info->coords.latitude.indicator,
+							    rmc_info->coords.longitude.indicator);
+	return bufPtr;
+}
+/*********************************************************************/
+char get_ewns_code(char latitude, char longtitude)
+{
+	if(latitude == 'N' && longtitude == 'E') return '0';
+	else if(latitude == 'N' && longtitude == 'W') return '1';
+	else if(latitude == 'S' && longtitude == 'E') return '2';
+	else if(latitude == 'S' && longtitude == 'W') return '3';
+	else return '4';   /* return invalid direction code */
+}
+/****************************************************************************/
+void Trio_BeginTMessage(char *msgBuffer)
+{
+	memset(msgBuffer, 0, MAX_T_MESSAGE_SIZE);
+	strcat(msgBuffer, T_MSG_START_STR);
+}
+/*****************************************************************************/
+void Trio_EndTMessage(char *msgBuffer)
+{
+	strcat(msgBuffer,T_MSG_END_STR);
+}
+

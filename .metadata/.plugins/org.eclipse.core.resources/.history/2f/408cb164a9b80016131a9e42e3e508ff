@@ -1,0 +1,532 @@
+/*
+ * rf_task.c
+ *
+ *  Created on: 24 Eki 2016
+ *      Author: admin
+ */
+#include "chip.h"
+#include "board.h"
+#include "timer.h"
+#include "le50.h"
+#include "sst25.h"
+#include "iap_config.h"
+#include "ProcessTask.h"
+#include "ATCommands.h"
+#include "QuectelM95.h"
+#include "settings.h"
+#include "messages.h"
+#include "io_ctrl.h"
+#include "offline.h"
+#include "gsm.h"
+#include "gps.h"
+#include "status.h"
+#include "trace.h"
+#include "utils.h"
+#include "MMA8652.h"
+#include "gSensor.h"
+#include "rf_task.h"
+#include <ctype.h>
+#include <string.h>
+#include <stdlib.h>
+
+
+static bool parse_rf_module_id_field(RF_NODE_T *node, char *pos, char *buffer);
+static bool parse_message_type(RF_NODE_T *node, char *pos, char *buffer);
+static bool parse_door_status_field(RF_NODE_T *node, char * pos,char *buffer);
+static bool parse_temp_value_field(RF_NODE_T *node, char * pos, char *buffer);
+static bool parse_bat_voltage_field(RF_NODE_T *node, char * pos, char *buffer);
+static bool parse_rssi_field(RF_NODE_T *node, char * pos, char *buffer);
+static bool parse_alarm_status_field(RF_NODE_T *node, char *p_pos, char *buffer);
+
+static const PINMUX_GRP_T T2_LE50PortMuxTable[] = {
+	{LE50_TX_PORT_NUM,  LE50_TX_PIN_NUM,   IOCON_MODE_PULLUP | IOCON_FUNC3},	/* TXD3 */
+	{LE50_RX_PORT_NUM,  LE50_RX_PIN_NUM,   IOCON_MODE_PULLUP | IOCON_FUNC3},	/* RXD3 */
+};
+
+static const RF_MSG_PARSER_INFO_T rf_msg_parser_info[] =
+{
+	{HEADER_MODULE_ID,     parse_rf_module_id_field},
+	{HEADER_MESSAGE_TYPE,  parse_message_type},
+    {HEADER_DOOR_STATUS,   parse_door_status_field},
+	{HEADER_TEMPERATURE,   parse_temp_value_field},
+	{HEADER_BATT_VOLTAGE,  parse_bat_voltage_field},
+	{HEADER_ALARM_STATUS,  parse_alarm_status_field},
+	{HEADER_RSSI,          parse_rssi_field}
+};
+
+#define LE50_UART_ISR_HANDLER 	    UART3_IRQHandler
+#define LE50_UART_IRQ_SELECTION     UART3_IRQn
+
+static RINGBUFF_T le50_txring,le50_rxring;          /* Transmit and receive ring buffers */
+static uint8_t le50_rxbuff[LE50_UART_RRB_SIZE];
+static uint8_t le50_txbuff[LE50_UART_SRB_SIZE];     /* Transmit and receive buffers */
+
+
+RF_NODE_T rf_node_array[MAX_NUMBER_OF_NODES];
+TIMER_INFO_T trailer_detection_delay_timer;
+char trailer_tracker_node_id[LE50_SERIAL_NUMBER_SIZE+ 1];
+bool rf_module_ready = false;
+bool trailer_id_lock = false;
+bool trailer_detection_timer_expired = false;
+static const uint8_t start_char_array[]={CHAR_SOH, CHAR_STX, '\0'};
+/************************************************** */
+void le50_uart_init()
+{
+	Chip_IOCON_SetPinMuxing(LPC_IOCON, T2_LE50PortMuxTable, sizeof(T2_LE50PortMuxTable) / sizeof(PINMUX_GRP_T));
+
+	Chip_UART_Init(LE50_PORT);
+	Chip_UART_SetBaud(LE50_PORT, LE50_BAUD_RATE);
+	Chip_UART_ConfigData(LE50_PORT, UART_LCR_WLEN8 | UART_LCR_SBS_1BIT | UART_LCR_PARITY_DIS);
+
+	/* Enable UART Transmit */
+	Chip_UART_TXEnable(LE50_PORT);
+
+	RingBuffer_Init(&le50_rxring, le50_rxbuff, 1, LE50_UART_RRB_SIZE);
+	RingBuffer_Init(&le50_txring, le50_txbuff, 1, LE50_UART_SRB_SIZE);
+
+	/* Enable receive data and line status interrupt */
+	Chip_UART_IntEnable(LE50_PORT, (UART_IER_RBRINT | UART_IER_RLSINT));
+
+	/* preemption = 1, sub-priority = 1 */
+	NVIC_SetPriority(LE50_UART_IRQ_SELECTION, 1);
+	NVIC_EnableIRQ(LE50_UART_IRQ_SELECTION);
+}
+/************************************************** */
+/*   Interrupt handler for LE50 UART interface      */
+/************************************************** */
+void LE50_UART_ISR_HANDLER(void)
+{
+	Chip_UART_IRQRBHandler(LE50_PORT, &le50_rxring, &le50_txring);
+}
+/************************************************** */
+void rf_init()
+{
+	int i;
+
+	for (i= 0; i< MAX_NUMBER_OF_NODES; i++)
+		rf_node_array[i].isAlive = false;
+	Set_Timer(&trailer_detection_delay_timer, TRILER_DETECTION_DELAY_TIME);
+	memset(trailer_tracker_node_id, 0, sizeof(trailer_tracker_node_id));
+}
+/************************************************** */
+bool Rf_Task()
+{
+	LINE_INFO_T line_info;
+	char recv_buffer[RF_MAX_PACKET_SIZE];
+
+	memset(recv_buffer, 0, RF_MAX_PACKET_SIZE);
+
+	line_info.p_uart  = LE50_PORT;
+	line_info.p_ringBuffer = &le50_rxring;
+	line_info.p_outBuffer = recv_buffer;
+	line_info.u16_outBufferSize = RF_MAX_PACKET_SIZE;
+	line_info.p_startCharArray = start_char_array;
+	line_info.u8_startCharArraySize = sizeof(start_char_array);
+	line_info.endChar = CHAR_CR;
+	line_info.u16_timeout = RF_DATA_IDLE_TIMEOUT;
+
+/* rf-id card readings  start with 0x01[SOH] and ends with "\r\n"  */
+	if(Get_UartLine(&line_info)){
+	    	PRINT_K("\n**************************\n");
+			PRINT_K("\nMessage from RF Node : ");
+			PRINT_K(recv_buffer);
+			PRINT_K("\n**************************\n");
+
+			rf_parse_packet(recv_buffer);
+	}
+
+     rf_update_alive_status();
+
+     if(!trailer_detection_timer_expired){
+    	 if(mn_timer_expired(&trailer_detection_delay_timer)){
+    		 PRINT_K("\n**********DORSE TANIMA BASLADI**************\n");
+    		 trailer_detection_timer_expired = true;
+    	 }
+
+     }
+}
+/************************************************/
+void rf_send(char *command)
+{
+	Chip_UART_SendRB(LE50_PORT, &le50_txring, command, strlen(command));
+}
+/************************************************/
+uint16_t rf_get_rx_buffer(char *buffer,  uint16_t buffer_size, TIMER_TICK_T idle_timeout)
+{
+	memset(buffer, 0, buffer_size);
+
+    return Chip_UART_ReadRB(LE50_PORT, &le50_rxring, buffer, buffer_size);
+}
+/***********************************************/
+bool rf_parse_packet(char *recv_buffer)
+{
+	RF_NODE_T node;
+	uint8_t i=0;
+	char *p_field;
+	char msg_parse_buffer[RF_MAX_PACKET_SIZE];
+
+	memset(&node, 0, sizeof(RF_NODE_T));
+
+	for(i = 0; i < sizeof(rf_msg_parser_info) / sizeof(rf_msg_parser_info[0]); i++ ){
+		memcpy(msg_parse_buffer, recv_buffer, RF_MAX_PACKET_SIZE);
+		p_field = strstr(msg_parse_buffer, rf_msg_parser_info[i].str_app_id);
+		if(p_field != NULL)
+			rf_msg_parser_info[i].field_parser_callback(&node, p_field + strlen(rf_msg_parser_info[i].str_app_id), msg_parse_buffer);
+	}
+	rf_update_node_table(&node);
+
+	if(trailer_detection_timer_expired){
+		if(rf_identify_trailer(&node)){
+			PRINT_K("\n********************\n");
+			PRINT_K("TRAILER IDENTIFIED");
+			PRINT_K(node.node_id);
+			PRINT_K("\n********************\n");
+			strcpy(trailer_tracker_node_id, node.node_id);
+		}
+		else
+			memset(trailer_tracker_node_id, 0, sizeof(trailer_tracker_node_id));
+	}
+}
+/***************************************************/
+bool rf_is_trailer_identified()
+{
+	if(strlen(trailer_tracker_node_id) > 0)
+		return true;
+	else
+		return false;
+}
+/***************************************************/
+bool rf_identify_trailer(RF_NODE_T *node)
+{
+	uint8_t i;
+	uint8_t trailer_id_count=0;
+	uint8_t trailer_id_index;
+
+	for (i= 0; i< MAX_NUMBER_OF_NODES; i++){
+		if((rf_node_array[i].isAlive) && (rf_node_array[i].message_type == MESSAGE_TYPE_TRAILER_TRACKING)){
+		//	PRINT_K("\nTRACKING MESSAGE FOUND\n");
+			trailer_id_count++;
+			trailer_id_index = i;
+			if(trailer_id_count > 1){
+				node = (RF_NODE_T *)NULL;
+				return false;
+			}
+		}
+	}
+	if(trailer_id_count == 1){
+		memcpy(node, &rf_node_array[trailer_id_index], sizeof(RF_NODE_T));
+		return true;
+	}
+}
+/***************************************************/
+bool rf_get_trailer_node_id(char *node)
+{
+	strcpy(node, trailer_tracker_node_id);
+}
+/***************************************************/
+void rf_update_node_table(RF_NODE_T *node)
+{
+	int node_index;
+	char printBuf[128];
+	node_index = rf_search_node_in_array(node);
+
+	if(node_index >= 0){
+		sprintf(printBuf, "Node found at index: %d\n", node_index);
+	//	PRINT_K(printBuf);
+		rf_node_array[node_index] = *node;
+		rf_node_array[node_index].isAlive  = true;
+		Set_Timer(&rf_node_array[node_index].heartbeat_timer, RF_NODE_ALIVE_TIMEOUT);
+	}
+	else{
+	//	PRINT_K("Node not found\n");
+		rf_add_node_to_array(node);
+	}
+}
+/***************************************************/
+int16_t rf_find_highest_trailer_id_rssi_node_index()
+{
+	uint16_t max_rssi = 0xFFFF;
+	int16_t max_rssi_index = -1;
+	int16_t i;
+
+	for (i= 0; i< MAX_NUMBER_OF_NODES; i++){
+		if(rf_node_array[i].message_type == MESSAGE_TYPE_TRAILER_TRACKING){
+			if(rf_node_array[i].rssi < max_rssi){
+				max_rssi = rf_node_array[i].rssi;
+				max_rssi_index = i;
+			}
+		}
+	}
+	return max_rssi_index;
+}
+/***************************************************/
+static bool parse_rf_module_id_field(RF_NODE_T *node, char *pos, char *buffer)
+{
+	char print_buf[128];
+//	PRINT_K("\nIn parse_rf_module_id_field() function\n");
+	memset(node->node_id, 0, LE50_SERIAL_NUMBER_SIZE + 1);
+	memcpy(node->node_id, pos, LE50_SERIAL_NUMBER_SIZE);
+	sprintf(print_buf,"\nModule ID %s\n", node->node_id);
+//	PRINT_K(print_buf);
+}
+/***************************************************/
+static bool parse_message_type(RF_NODE_T *node, char *pos, char *buffer)
+{
+	char *p_end;
+	char printBuf[128];
+
+	p_end = strchr(pos, RF_NODE_MSG_FIELD_SEPERATOR);
+	if(p_end != NULL)
+		 *p_end = '\0';
+	else
+		  return false;
+
+	node->message_type = atoi(pos);
+	sprintf(printBuf,"Message Type %d\n",node->message_type);
+//	PRINT_K(printBuf);
+}
+/***************************************************/
+static bool parse_door_status_field(RF_NODE_T *node, char * pos, char *buffer)
+{
+	if(*pos == '1'){
+		//PRINT_K("\nDOOR 1 OPEN\n");
+		node->door_status[0] = true;
+	}
+	else{
+		//PRINT_K("\nDOOR 1 CLOSED\n");
+		node->door_status[0] = false;
+	}
+
+	if(*(pos + 2) == '1'){
+		//PRINT_K("\nDOOR 2 OPEN\n");
+		node->door_status[1] = true;
+	}
+	else{
+		//PRINT_K("\nDOOR 2 CLOSED\n");
+		node->door_status[1] = false;
+	}
+
+}
+/***************************************************/
+static bool parse_temp_value_field(RF_NODE_T *node, char * p_pos, char *buffer)
+{
+	char printBuf[128];
+	char str_temp_val[8];
+	char *p_comma;
+	char *p_end;
+
+	p_end = strchr(p_pos, RF_NODE_MSG_FIELD_SEPERATOR);
+
+    if(p_end != NULL)
+	   *p_end = '\0';
+    else
+    	return false;
+
+	p_comma = strchr(p_pos, ',');
+
+	if(p_comma != NULL){
+		//PRINT_K("\n cift kanal\n");
+		memset(str_temp_val, 0, sizeof(str_temp_val));
+		memcpy(str_temp_val, p_pos, (p_comma - p_pos));
+		node->ds18b20_channel[0] = atoi(str_temp_val);
+		memset(str_temp_val, 0, sizeof(str_temp_val));
+		memcpy(str_temp_val, p_comma+ 1 , (p_end - p_comma -1));
+		node->ds18b20_channel[1] = atoi(str_temp_val);
+	}
+	else{
+		//PRINT_K("\ntek kanal\n");
+		memset(str_temp_val, 0, sizeof(str_temp_val));
+		memcpy(str_temp_val, p_pos, (p_end - p_comma));
+		node->ds18b20_channel[0] = atoi(str_temp_val);
+	}
+	sprintf(printBuf, "Temp1: %d Temp2: %d\n", node->ds18b20_channel[0],node->ds18b20_channel[1]);
+	//PRINT_K(printBuf);
+
+	return true;
+}
+/***************************************************/
+static bool parse_bat_voltage_field(RF_NODE_T *node, char *p_pos, char *buffer)
+{
+	char *p_end;
+	char printBuf[128];
+
+	p_end = strchr(p_pos, RF_NODE_MSG_FIELD_SEPERATOR);
+	 if(p_end != NULL)
+	   *p_end = '\0';
+	 else
+	   return false;
+
+	 node->bat_voltage = atoi(p_pos);
+	 sprintf(printBuf,"Battery voltage %d\n",node->bat_voltage);
+	// PRINT_K(printBuf);
+	 return true;
+
+}
+/***************************************************/
+static bool parse_rssi_field(RF_NODE_T *node, char *p_pos, char *buffer)
+{
+	char printBuf[64];
+	char *p_end;
+
+	p_end = strchr(p_pos, CHAR_CR);
+
+	if(p_end != NULL)
+		*p_end = '\0';
+	else
+		return false;
+
+	node->rssi = atoi(p_pos);
+	sprintf(printBuf,"RSSI Value: %d\n",node->rssi);
+	//PRINT_K(printBuf);
+	return true;
+}
+/***************************************************/
+static bool parse_alarm_status_field(RF_NODE_T *node, char *p_pos, char *buffer)
+{
+	char *p_end;
+	char printBuf[64];
+
+	p_end = strchr(p_pos, RF_NODE_MSG_FIELD_SEPERATOR);
+	if(p_end != NULL)
+		*p_end = '\0';
+	else
+		return false;
+   node->alarm_status = atoi(p_pos);
+   sprintf(printBuf,"Alarm Status: %d\n",node->alarm_status);
+ //  PRINT_K(printBuf);
+   return true;
+
+}
+/************************************************** */
+int16_t rf_search_node_in_array(RF_NODE_T *node)
+{
+	int i;
+	for (i= 0; i< MAX_NUMBER_OF_NODES; i++){
+		if(strcmp(rf_node_array[i].node_id, node->node_id) == 0)
+			return i;
+	}
+	return -1;
+}
+/***************************************************/
+int16_t rf_find_free_node_array_index()
+{
+	int i;
+	for (i= 0; i< MAX_NUMBER_OF_NODES; i++){
+		if(!rf_node_array[i].isAlive)
+			return i;
+	}
+	return -1;
+}
+/***************************************************/
+bool rf_add_node_to_array(RF_NODE_T *node)
+{
+	int16_t node_index;
+	char printBuf[128];
+	node_index = rf_find_free_node_array_index();
+	if(node_index >=0){
+		Set_Timer(&(node->heartbeat_timer), RF_NODE_ALIVE_TIMEOUT);
+		node->isAlive = true;
+		memcpy(&rf_node_array[node_index], node, sizeof(RF_NODE_T));
+		sprintf(printBuf, "Adding node to index: %d\n", node_index);
+		PRINT_K(printBuf);
+		return true;
+	}
+	return false;
+}
+/***************************************************/
+bool rf_get_node_presence_status()
+{
+	int i;
+	for (i= 0; i< MAX_NUMBER_OF_NODES; i++){
+		if(rf_node_array[i].isAlive){
+			//PRINT_K("Canli node bulundu\n");
+			return true;
+		}
+	}
+	return false;
+}
+/***************************************************/
+void rf_get_node_in_ram(RF_NODE_T *node, uint16_t index)
+{
+	memcpy(node, &rf_node_array[index], sizeof(RF_NODE_T));
+}
+/***************************************************/
+void rf_update_alive_status()
+{
+	int i;
+    char buffer[128];
+
+	for (i= 0; i< MAX_NUMBER_OF_NODES; i++){
+		if(mn_timer_expired(&rf_node_array[i].heartbeat_timer) && rf_node_array[i].isAlive){
+			rf_node_array[i].isAlive = false;
+			sprintf(buffer,"\n********************NODE AT INDEX %d DEAD*************************\n",i);
+			PRINT_K(buffer);
+		}
+	}
+}
+/***************************************************/
+bool rf_check_node_alarm_exist()
+{
+	RF_NODE_T node;
+	char printBuf[64];
+	int i;
+
+	for(i= 0; i< MAX_NUMBER_OF_NODES; i++){
+		if(rf_node_array[i].alarm_status != RF_NODE_NO_ALARM){
+			sprintf(printBuf, "\nAlarm status detected at %s\n",rf_node_array[i].node_id);
+		//	PRINT_K(printBuf);
+			return true;
+		}
+	}
+	return false;
+}
+/***************************************************/
+bool rf_get_node_alarm(RF_NODE_T *node)
+{
+	int i;
+
+	for(i= 0; i< MAX_NUMBER_OF_NODES; i++){
+		if(rf_node_array[i].alarm_status != RF_NODE_NO_ALARM){
+			if(rf_is_registered_node(&rf_node_array[i])){
+				memcpy(node,&rf_node_array[i], sizeof(RF_NODE_T));
+				rf_node_array[i].alarm_status = RF_NODE_NO_ALARM;
+		        PRINT_K("\n******RF NODE ALARM******\n");
+		        return true;
+			}
+		}
+	}
+	return false;
+}
+/***************************************************/
+void rf_clear_node_alarm(uint16_t i)
+{
+	rf_node_array[i].alarm_status = RF_NODE_NO_ALARM;
+}
+/***************************************************/
+bool rf_is_registered_node(RF_NODE_T *node)
+{
+	REG_NODE_INFO_T reg_nodes[MAX_NUMBER_OF_NODES];
+	int i;
+
+	settings_get_registered_node_table(reg_nodes);
+
+	for(i= 0; i< MAX_NUMBER_OF_NODES; i++){
+		if((strcmp(reg_nodes[i].node_id, node->node_id) == 0 && reg_nodes[i].node_number < MAX_NUMBER_OF_NODES))
+			return true;
+	}
+	return false;
+}
+/***************************************************/
+uint8_t rf_get_alive_nodes(RF_NODE_T *node)
+{
+	int i;
+	int k = 0;
+
+	for(i= 0; i< MAX_NUMBER_OF_NODES; i++){
+		if(rf_node_array[i].isAlive)
+			node[k++] = rf_node_array[i];
+	}
+	return k;
+}
+/*****************************************************/
+

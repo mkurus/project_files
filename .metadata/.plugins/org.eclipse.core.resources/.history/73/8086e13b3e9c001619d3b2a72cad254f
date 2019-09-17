@@ -1,0 +1,89 @@
+/*
+ * rf_node.c
+ *
+ *  Created on: 23 Eki 2016
+ *      Author: admin
+ */
+#include "chip.h"
+#include "board.h"
+#include "timer.h"
+#include "iap_config.h"
+#include "ProcessTask.h"
+#include "ATCommands.h"
+#include "QuectelM95.h"
+#include "sst25.h"
+#include "settings.h"
+#include "rf_node.h"
+#include "messages.h"
+#include "io_ctrl.h"
+#include "offline.h"
+#include "gsm.h"
+#include "gps.h"
+#include "status.h"
+#include "trace.h"
+#include "utils.h"
+#include "MMA8652.h"
+#include "gSensor.h"
+#include <ctype.h>
+#include <string.h>
+#include <stdlib.h>
+
+
+bool rf_add_node(RF_NODE_T * node)
+{
+	RF_NODE_T temp_nodes[MAX_NUMBER_OF_NODES];
+	int i;
+	char buffer[128];
+
+	sst25_read_array(RF_NODES_ID_TABLE, MAX_NUMBER_OF_NODES * sizeof(RF_NODE_T), (char *)temp_nodes);
+	for(i= 0; i< MAX_NUMBER_OF_NODES; i++){
+		if(temp_nodes[i].node_number == 0xFFFF){    /* empty node index */
+			sprintf(buffer,"\nFree node index at %d:", i);
+			PRINT_K(buffer);
+			node->node_number = i;
+			temp_nodes[i] = *node;
+			break;
+		}
+	}
+	settings_update_node_table(temp_nodes);
+}
+/***************************************************/
+bool rf_remove_node(char * node_id)
+{
+	RF_NODE_T temp_nodes[MAX_NUMBER_OF_NODES];
+	int index;
+	char buffer[128];
+
+	sst25_read_array(RF_NODES_ID_TABLE, MAX_NUMBER_OF_NODES * sizeof(RF_NODE_T), (char *)temp_nodes);
+	index = rf_search_node(node_id);
+	if(index >=0){
+		temp_nodes[index].node_number = 0xFFFF;
+		settings_update_node_table(temp_nodes);
+		sprintf(buffer,"\nNode removed at index: %d:\n", index);
+		PRINT_K(buffer);
+		return TRUE;
+	}
+	else{
+		sprintf(buffer,"\nCannot found node: %s\n", node_id);
+	    PRINT_K(buffer);
+	    return FALSE;
+	}
+}
+/***************************************************/
+int rf_search_node(char * node_id)
+{
+	RF_NODE_T temp_nodes[MAX_NUMBER_OF_NODES];
+	int i;
+	char buffer[128];
+
+	sst25_read_array(RF_NODES_ID_TABLE, MAX_NUMBER_OF_NODES * sizeof(RF_NODE_T), (char *)temp_nodes);
+
+	for(i= 0; i< MAX_NUMBER_OF_NODES; i++){
+		if((strcmp(temp_nodes[i].node_id, node_id) == 0) && (temp_nodes[i].node_number < MAX_NUMBER_OF_NODES)){
+			sprintf(buffer,"\nNode id found at index: %d:\n", i);
+			PRINT_K(buffer);
+			return i;
+		}
+	 }
+	return -1;
+}

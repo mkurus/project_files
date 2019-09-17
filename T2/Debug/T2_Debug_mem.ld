@@ -1,0 +1,42 @@
+/*
+ * GENERATED FILE - DO NOT EDIT
+ * (c) Code Red Technologies Ltd, 2008-2017
+ * (c) NXP Semiconductors 2013-2017
+ * Linker script memory definitions
+ * Created from LinkMemoryTemplate
+ * By LPCXpresso v7.7.2 [Build 379] [2015-03-31]  on Fri Jan 13 11:53:29 EET 2017)
+*/
+
+MEMORY
+{
+  /* memory regions for update binary */
+  
+ /*  MFlash512 (rx) : ORIGIN = 0x40000, LENGTH = 0x30000   */ /* 512K bytes */
+ /*  RamLoc32 (rwx) : ORIGIN = 0x10000000, LENGTH = 0x7FC0 */  /* 32K bytes */
+ /*  RamAHB32 (rwx) : ORIGIN = 0x2007c000, LENGTH = 0x8000 */ /* 32K bytes */
+  
+   /* memory regions for production binary */
+  /* MFlash512 (rx) : ORIGIN = 0x10000,    LENGTH = 0x30000  */ /* 512K bytes */
+  /* RamLoc32 (rwx) : ORIGIN = 0x10000000, LENGTH = 0x7FC0   */  /* 32K bytes */
+ /*  RamAHB32 (rwx) : ORIGIN = 0x2007c000, LENGTH = 0x8000  */   /* 32K bytes */
+  
+  /* default memory configuration */
+   MFlash512 (rx) : ORIGIN = 0x00000, LENGTH = 0x80000  /* 512K bytes */
+   RamLoc32 (rwx) : ORIGIN = 0x10000000, LENGTH = 0x7FC0  /* 32K bytes */
+   RamAHB32 (rwx) : ORIGIN = 0x2007c000, LENGTH = 0x8000 /* 32K bytes */
+}
+  /* Define a symbol for the top of each memory region */
+  __base_MFlash512 = 0x0  ; /* MFlash512 */  
+  __base_Flash = 0x0 ; /* Flash */  
+  __top_MFlash512 = 0x0 + 0x80000 ; /* 512K bytes */  
+  __top_Flash = 0x0 + 0x80000 ; /* 512K bytes */  
+  __base_RamLoc32 = 0x10000000  ; /* RamLoc32 */  
+  __base_RAM = 0x10000000 ; /* RAM */  
+  __top_RamLoc32 = 0x10000000 + 0x8000 ; /* 32K bytes */  
+  __top_RAM = 0x10000000 + 0x8000 ; /* 32K bytes */  
+  __base_RamAHB32 = 0x2007c000  ; /* RamAHB32 */  
+  __base_RAM2 = 0x2007c000 ; /* RAM2 */  
+  __top_RamAHB32 = 0x2007c000 + 0x8000 ; /* 32K bytes */  
+  __top_RAM2 = 0x2007c000 + 0x8000 ; /* 32K bytes */  
+
+

@@ -1,0 +1,87 @@
+/*
+ * leds.h
+ *
+ *  Created on: 29 Şub 2016
+ *      Author: admin
+ */
+
+#ifndef IO_CTRL_H_
+#define IO_CTRL_H_
+
+
+#define EMERG_OFF_PORT_NUM                2
+#define EMERG_OFF_BIT_NUM                 11
+
+#define PWRKEY_PORT_NUM                   0
+#define PWRKEY_BIT_NUM                    4
+
+#define IGN_DETECT_PORT_NUM               0
+#define IGN_DETECT_PIN_NUM                21
+
+#define PWR_DETECT_PORT_NUM               0
+#define PWR_DETECT_PIN_NUM                22
+
+#define SIM_DETECT_PORT_NUM               2
+#define SIM_DETECT_PIN_NUM                5
+
+#define GPS_PWR_ENABLE_PORT_NUM           0
+#define GPS_PWR_ENABLE_PIN_NUM            25
+
+#define GSM_ENABLE_PORT_NUM               0
+#define GSM_ENABLE_PIN_NUM                23
+
+#define P_ROLE_PORT_NUM                   3
+#define P_ROLE_PIN_NUM                    26
+/*****************************************/
+#define DIN1_PORT_NUM                     1
+#define DIN2_PORT_NUM                     1
+#define DIN3_PORT_NUM                     1
+#define DIN4_PORT_NUM                     1
+#define DIN5_PORT_NUM                     1
+#define DIN6_PORT_NUM                     1
+#define DIN7_PORT_NUM                     1
+
+#define DIN1_PIN_NUM                     21
+#define DIN2_PIN_NUM                     20
+#define DIN3_PIN_NUM                     22
+#define DIN4_PIN_NUM                     23
+#define DIN5_PIN_NUM                     19
+#define DIN6_PIN_NUM                     18
+#define DIN7_PIN_NUM                     25
+/******************************************/
+#define DOUT1_GPIO_PORT_NUM               0
+#define DOUT2_GPIO_PORT_NUM               1
+#define DOUT1_GPIO_PIN_NUM                20
+#define DOUT2_GPIO_PIN_NUM                24
+/******************************************/
+#define P_LED_OK_GPIO_PORT_NUM            2
+//#define P_LED_GPS_GPIO_PORT_NUM           3
+#define P_LED_OK_GPIO_PIN_NUM             3
+//#define P_LED_GPS_GPIO_PIN_NUM            26
+
+typedef struct LINE{
+	char startChar;
+	char endChar;
+}LINE_T;
+
+typedef struct LINE_INFO{
+	LPC_USART_T *p_uart;
+	RINGBUFF_T *p_ringBuffer;
+	char *p_outBuffer;
+	uint16_t u16_outBufferSize;
+	LINE_T *p_line;
+  /*  char *p_startCharArray;
+    uint8_t u8_startCharArraySize;
+    char *p_endCharArray;
+    uint8_t u8_endCharArraySize;*/
+	uint16_t u16_timeout;
+}LINE_INFO_T;
+void Gsm_TurnOn();
+void Gsm_TurnOff();
+void gpio_init();
+void Toggle_GPS_Led();
+void Toggle_POK_Led();
+void Trio_Init_Gpio();
+void TogglePin(uint8_t port_number, uint8_t pin_number, uint16_t duration);
+uint16_t Get_UartLine(LINE_INFO_T *line_info);
+#endif /* IO_CTRL_H_ */

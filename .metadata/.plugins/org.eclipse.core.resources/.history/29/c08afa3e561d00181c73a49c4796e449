@@ -1,0 +1,160 @@
+/*
+ * hx711.c
+
+ *
+ *  Created on: 24 Mar 2017
+ *      Author: mkurus
+ */
+
+#include "chip.h"
+#include "board.h"
+#include "bsp.h"
+#include "trace.h"
+#include "hx711.h"
+#include "timer.h"
+#include "io_ctrl.h"
+#include "settings.h"
+#include <string.h>
+
+const HX711_CONFIG_T hx711_config_t ={
+		DIN1_PORT_NUM, DOUT1_GPIO_PORT_NUM, HX711_DAT ,HX711_CLK};
+
+HX711_CALIB_T hx711_calib_t;
+/**
+ *
+ */
+void hx711_init()
+{
+	settings_get_calibration_coefficents(&hx711_calib_t);
+
+}
+/**
+ * read raw ADC value
+ */
+bool hx711_read_adc(int32_t *result)
+{
+    uint32_t ul_count;
+	uint32_t i;
+	TIMER_INFO_T timer;
+	/* Serial clock input pin (PD_SCK) should be low
+	 * on idle. We have inverted output on digital
+	 * output 1.
+	 */
+	hx711_set_clk(true);     /* put HX711 out of reset */
+	Delay(10, NULL);
+	hx711_set_clk(false);
+	ul_count = 0;
+	/*
+	 * When output data is not ready for retrieval,
+	 * digital output pin of HX711 is high.When DOUT goes
+	 * to low, it indicates data is ready for retrieval.
+	 * We have inverted input on digital input 1.
+	 */
+	bool success = false;
+	for (i = 0; i < 100; i++) {
+		if(!hx711_get_data()){
+			success = true;
+			break;
+		}
+		Delay(10, NULL);
+	}
+	if(!success)
+		PRINT_K("\nxxxxxxxxxxxx\n");
+
+
+
+
+
+	for(i = 0; i < CLK_PULSE_COUNT; i++) {
+		hx711_set_clk(true);
+		DelayUs(HX711_CLK_PLS_LENGTH);
+		ul_count = ul_count << 1;
+		if(hx711_get_data())
+			ul_count++;
+		hx711_set_clk(false);
+		DelayUs(HX711_CLK_PLS_LENGTH);
+
+	}
+	hx711_set_clk(true);
+	DelayUs(HX711_CLK_PLS_LENGTH);
+	hx711_set_clk(false);
+	DelayUs(HX711_CLK_PLS_LENGTH);
+
+	//hx711_set_clk(true);                 /* put HX711 into reset */
+	//DelayUs(HX711_DELAY_AFTER_RESET);
+	*result = ((int32_t)(ul_count<<8))>>8;
+
+	return true;
+}
+/**
+ * calculate calibrated weigth value
+ */
+bool hx711_calc_load(int32_t *result)
+{
+	int32_t val;
+	if(hx711_read_adc(&val)){
+		*result = (val - hx711_calib_t.coeff_c) / hx711_calib_t.coeff_m;
+		return true;
+	}
+	return false;
+}
+/**
+ *  hx711_calibrate()
+ *  avg_count:   number of samples to calculate zero offset value
+ *  ref_weigth:  reference weight to calculate gain
+*/
+HX711_CALIB_T hx711_calibrate(int avg_count, int ref_weigth)
+{
+
+	float avg1,avg2;
+	int32_t val;
+	int32_t i;
+	char printBuf[128];
+
+	avg1 = 0;
+	for(i = 0; i < avg_count; i++){
+		if(hx711_read_adc(&val)){
+			sprintf(printBuf, "\nHX711 ADC value %d\n", (int)val);
+			PRINT_K(printBuf);
+			avg1 +=  (float)val / avg_count;
+		}
+	}
+	hx711_calib_t.coeff_c = avg1;
+
+	sprintf(printBuf,"\nCalibraion c value %d\n", (int)(hx711_calib_t.coeff_c));
+	PRINT_K(printBuf);
+
+	sprintf(printBuf,"\nPut a %d g reference weight on scale\n", ref_weigth);
+	PRINT_K(printBuf);
+
+	trace_get_char();
+	avg2 = 0;
+	for(i =0; i < avg_count; i++){
+		if(hx711_read_adc(&val)){
+			sprintf(printBuf, "\nHX711 ADC value %d\n", (int)val);
+			PRINT_K(printBuf);
+			avg2 +=  (float)val / avg_count;
+		}
+	}
+	hx711_calib_t.coeff_m = (avg2 - avg1) / ref_weigth;
+
+	sprintf(printBuf, "\nCalibraion m value %f\n", hx711_calib_t.coeff_m);
+	PRINT_K(printBuf);
+
+	return hx711_calib_t;
+}
+/**
+ *  read hx711 data bit
+ */
+bool hx711_get_data()
+{
+	return (!Chip_GPIO_GetPinState(LPC_GPIO, hx711_config_t.u8_dataPort, hx711_config_t.u8_dataPin) );
+}
+/**
+ * set clock pulse state
+ */
+void hx711_set_clk(bool status)
+{
+	Chip_GPIO_SetPinState(LPC_GPIO,hx711_config_t.u8_clkPort , hx711_config_t.u8_clkPin, !status);
+	//DelayUs(delay);
+}

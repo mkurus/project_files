@@ -1,0 +1,31 @@
+/*
+ * rf_task.h
+ *
+ *  Created on: 24 Eki 2016
+ *      Author: admin
+ */
+
+#ifndef RF_TASK_H_
+#define RF_TASK_H_
+
+
+
+#define     LE50_UART_RRB_SIZE      256
+#define     LE50_UART_SRB_SIZE      256
+#define		RF_MAX_PACKET_SIZE      128
+#define     RF_MAX_MSG_FIELD_SIZE   16
+#define     RF_PACKET_TIMEOUT       100
+
+#define     RF_NODE_MSG_FIELD_SEPERATOR        ';'
+typedef struct RF_MSG_PARSER_INFO
+{
+	uint8_t field_index;
+	bool (*field_parser_callback)(int16_t pos, char *buffer);
+}RF_MSG_PARSER_INFO_T;
+
+void rf_uart_init();
+void rf_send(char *command);
+bool rf_parse_packet(char *recv_buffer);
+uint16_t rf_get_rx_buffer(char *buffer,  uint16_t buffer_size, TIMER_TICK_T idle_timeout);
+bool Rf_Task();
+#endif /* RF_TASK_H_ */

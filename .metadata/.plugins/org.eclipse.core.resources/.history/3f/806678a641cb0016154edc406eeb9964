@@ -1,0 +1,201 @@
+/*
+ * tablet_msg.c
+ *
+ *  Created on: 6 Ara 2016
+ *      Author: admin
+ */
+#include "chip.h"
+#include "board.h"
+#include "ttypes.h"
+#include "utils.h"
+#include "trace.h"
+#include "status.h"
+#include "event.h"
+#include "messages.h"
+#include "tablet_app.h"
+#include "msg_parser.h"
+
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <ctype.h>
+#include "json_parser.h"
+
+
+JSON_DATA_T json_data_t;
+/***********************************************/
+void rfid_msg_recv_callback(char *buffer, COMMAND_RESPONSE_T *response, const UART_PORT_T *src_port)
+{
+	T_MSG_EVENT_T t_msg_event_t;
+	char printBuf[128];
+	sprintf(printBuf,"\nRFID message: %s", &buffer[1]);
+	PRINT_K(printBuf);
+	memset(&t_msg_event_t, 0, sizeof(T_MSG_EVENT_T));
+	strcpy(t_msg_event_t.msg_type, EVENT_RFID_CARD_READING);
+	strcpy(t_msg_event_t.param, &buffer[1]);
+	put_t_msg_event(&t_msg_event_t);
+
+
+	//set_event(RFID_CARD_READING);
+	//update_rfid_msg_buffer(&buffer[1]);
+}
+/***********************************************/
+void set_msg_recv_callback(char *buffer, COMMAND_RESPONSE_T *response, const UART_PORT_T *src_port)
+{
+	COMMAND_RESULT_T result;
+
+	PRINT_K("\nSET message received\n");
+	result = ProcessReceivedData(buffer, response, COMMAND_SOURCE_UART);
+	if(result == REPLY_ECHO_PACKET)
+		PRINT_K(response->buffer);
+	if(response->b_needToReset)
+		NVIC_SystemReset();
+}
+/***********************************************/
+void tablet_msg_recv_callback(char *buffer, COMMAND_RESPONSE_T *response, const UART_PORT_T *src_port)
+{
+	TABLET_APP_EVENT_T tablet_event;
+
+	int i;
+	int tagCount;
+	int k, inc;
+	char printBuf[256];
+	jsmn_parser p;
+	jsmntok_t t[128]; /* We expect no more than 128 tokens */
+
+	PRINT_K("In tablet_msg_recv_callback()");
+	jsmn_init(&p);
+	tagCount = jsmn_parse(&p, buffer, strlen(buffer), t, sizeof(t)/sizeof(t[0]));
+		if (tagCount < 0) {
+			sprintf(printBuf,"Failed to parse JSON: %d\n", tagCount);
+			PRINT_K(printBuf);
+			return 1;
+		}
+
+		/* Assume the top-level element is an object */
+		if (tagCount < 1 || t[0].type != JSMN_OBJECT) {
+			PRINT_K("Object expected\n");
+			return 1;
+		}
+	/*	sprintf(printBuf,"\n%d Object %.*s\n",t[0].size, t[0].end-t[0].start, buffer + t[0].start);
+	    PRINT_K(printBuf);*/
+		/* Loop over all keys of the root object */
+
+		for (i = 1; i < tagCount; i++) {
+			if (jsoneq(buffer, &t[i], "type") == 0) {
+				for(k = 0; k < sizeof(json_obj_types_t) / sizeof(json_obj_types_t[0]); k++ ){
+					if (jsoneq(buffer, &t[i+1], json_obj_types_t[k].json_obj_type) == 0) {
+						tablet_event = json_obj_types_t[k].json_type_object_callback(&t[1], buffer ,tagCount);
+						tablet_event.uart_ptr = src_port;
+						write_tablet_app_event(&tablet_event);
+					}
+				}
+			}
+		}
+}
+/*******************************************************/
+uint16_t json_content_object_callback(jsmntok_t * p_object, char *msg)
+{
+	int j,i;
+	char printBuf[128];
+
+/*	if ((p_object+1)->type != JSMN_OBJECT) {
+		sprintf(printBuf,"\nObject typed %d\n",(p_object+1)->type);
+		PRINT_K(printBuf);
+		PRINT_K("Returning zero\n");
+		return 0;         */                       /* We expect groups to be an array of strings */
+	/*}*/
+/*	sprintf(printBuf,"Size %d\n", p_object->size);
+	PRINT_K(printBuf);*/
+
+	/*jsmntok_t *g = p_object+ j+ 1;
+	sprintf(printBuf,"  * %.*s\n", g->end - g->start, msg + g->start);
+	PRINT_K(printBuf);*/
+
+	for (j = 0; j < p_object->size; j++) {
+		jsmntok_t *g = p_object+ j+ 1;
+
+		sprintf(printBuf,"  * %.*s\n", g->end - g->start, msg + g->start);
+		PRINT_K(printBuf);
+	}
+	return  (p_object->size) + 1;
+}
+/*********************************************************************/
+TABLET_APP_EVENT_T json_text_type_parser_callback(jsmntok_t *p_object, char *msg, int tagCount)
+{
+	TABLET_APP_EVENT_T tablet_event;
+	T_MSG_EVENT_T t_msg_event;
+	char temp[128];
+	bool found = false;
+	int i=0;
+	int size;
+
+	p_object++;
+
+	for (i = 0; i < tagCount; i++) {
+		if (jsoneq(msg, (p_object + i), "content") == 0){
+			size = (p_object+ i+ 1)->size;
+			if(size != JSON_TEXT_TYPE_CONTENT_SIZE){
+				tablet_event.event_type = TYPE_NULL;
+				return tablet_event;
+			}
+			else{
+				p_object = (p_object+ i+ 1); /* point to start of content object */
+				found = true;
+				break;
+			}
+		}
+	}
+   if(!found){
+	   tablet_event.event_type = TYPE_NULL;
+	   return tablet_event;
+   }
+
+
+	for (i = 0; i < size * 2; i++){
+	/*	if(jsoneq(msg, (p_object + i), "tag") == 0){
+			strncpy(temp , msg + (p_object+i+1)->start ,(p_object+i+1)->end - (p_object+i+1)->start);
+			json_data_t.json_type_text.tag = atoi(temp);
+		}*/
+		if(jsoneq(msg, (p_object + i), "msg") == 0)
+			strncpy(json_data_t.json_type_text.message , msg + (p_object+i+1)->start ,(p_object+i+1)->end - (p_object+i+1)->start);
+
+		else if(jsoneq(msg, (p_object + i), "id") == 0)
+			strncpy(json_data_t.json_type_text.msg_id , msg + (p_object+i+1)->start ,(p_object+i+1)->end - (p_object+i+1)->start);
+
+
+	}
+	/*sprintf(temp,"\n*Message  %s\n  *Message ID: %s\n",json_data_t.json_type_text.message,
+														json_data_t.json_type_text.msg_id);
+	PRINT_K(temp);*/
+	memset(&t_msg_event, 0, sizeof(T_MSG_EVENT_T));
+
+	strcpy(t_msg_event.msg_type,EVENT_SEND_MOBILE_APP_MSG);
+	t_msg_event.p_param= json_data_t.json_type_text.message;
+//	strcpy(t_msg_event.param, json_data_t.json_type_text.message);
+	put_t_msg_event(&t_msg_event);
+
+	tablet_event.event_type = TYPE_MESSAGE_FROM_USER;
+	tablet_event.json_data_t= json_data_t;
+//	tablet_event.uart_ptr = src_port;
+	return tablet_event;
+
+}
+/*********************************************************************/
+TABLET_APP_EVENT_T json_keep_alive_type_parser_callback(jsmntok_t *p_object, char *msg,int tagCount)
+{
+	TABLET_APP_EVENT_T tablet_event;
+
+	tablet_event.event_type = TYPE_KEEP_ALIVE_REQ;
+
+	return tablet_event;
+}
+/*********************************************************************/
+TABLET_APP_EVENT_T json_canbus_type_parser_callback(jsmntok_t *p_object, char *msg, int tagCount)
+{
+
+}
+TABLET_APP_EVENT_T json_sensor_type_parser_callback(jsmntok_t *p_object, char *msg,int tagCount)
+{
+
+}

@@ -1,0 +1,326 @@
+/*
+ * rf_task.c
+ *
+ *  Created on: 24 Eki 2016
+ *      Author: admin
+ */
+#include "chip.h"
+#include "board.h"
+#include "timer.h"
+#include "le50.h"
+#include "iap_config.h"
+#include "ProcessTask.h"
+#include "ATCommands.h"
+#include "QuectelM95.h"
+#include "settings.h"
+#include "messages.h"
+#include "io_ctrl.h"
+#include "offline.h"
+#include "gsm.h"
+#include "gps.h"
+#include "status.h"
+#include "trace.h"
+#include "utils.h"
+#include "MMA8652.h"
+#include "gSensor.h"
+#include "rf_task.h"
+#include <ctype.h>
+#include <string.h>
+#include <stdlib.h>
+
+
+static bool parse_rf_module_id_field(RF_NODE_T *node, char *pos, char *buffer);
+static bool parse_door_status_field(RF_NODE_T *node, char * pos,char *buffer);
+static bool parse_temp_value_field(RF_NODE_T *node, char * pos, char *buffer);
+static bool parse_bat_voltage_field(RF_NODE_T *node, char * pos, char *buffer);
+static bool parse_rssi_field(RF_NODE_T *node, char * pos, char *buffer);
+
+static const PINMUX_GRP_T T2_LE50PortMuxTable[] = {
+	{LE50_TX_PORT_NUM,  LE50_TX_PIN_NUM,   IOCON_MODE_PULLUP | IOCON_FUNC3},	/* TXD3 */
+	{LE50_RX_PORT_NUM,  LE50_RX_PIN_NUM,   IOCON_MODE_PULLUP | IOCON_FUNC3},	/* RXD3 */
+};
+static const RF_MSG_PARSER_INFO_T rf_msg_parser_info[] =
+{
+	{"1=", parse_rf_module_id_field},
+    {"2=", parse_door_status_field},
+	{"3=", parse_temp_value_field},
+	{"4=", parse_bat_voltage_field},
+	{"/",  parse_rssi_field}
+
+};
+#define LE50_UART_ISR_HANDLER 	    UART3_IRQHandler
+#define LE50_UART_IRQ_SELECTION     UART3_IRQn
+
+static RINGBUFF_T le50_txring,le50_rxring;          /* Transmit and receive ring buffers */
+static uint8_t le50_rxbuff[LE50_UART_RRB_SIZE];
+static uint8_t le50_txbuff[LE50_UART_SRB_SIZE];     /* Transmit and receive buffers */
+
+
+RF_NODE_T rf_node_array[MAX_NUMBER_OF_NODES];
+/************************************************** */
+void le50_uart_init()
+{
+	Chip_IOCON_SetPinMuxing(LPC_IOCON, T2_LE50PortMuxTable, sizeof(T2_LE50PortMuxTable) / sizeof(PINMUX_GRP_T));
+
+	Chip_UART_Init(LE50_PORT);
+	Chip_UART_SetBaud(LE50_PORT, LE50_BAUD_RATE);
+	Chip_UART_ConfigData(LE50_PORT, UART_LCR_WLEN8 | UART_LCR_SBS_1BIT | UART_LCR_PARITY_DIS);
+
+	/* Enable UART Transmit */
+	Chip_UART_TXEnable(LE50_PORT);
+
+	RingBuffer_Init(&le50_rxring, le50_rxbuff, 1, LE50_UART_RRB_SIZE);
+	RingBuffer_Init(&le50_txring, le50_txbuff, 1, LE50_UART_SRB_SIZE);
+
+	/* Enable receive data and line status interrupt */
+	Chip_UART_IntEnable(LE50_PORT, (UART_IER_RBRINT | UART_IER_RLSINT));
+
+	/* preemption = 1, sub-priority = 1 */
+	NVIC_SetPriority(LE50_UART_IRQ_SELECTION, 1);
+	NVIC_EnableIRQ(LE50_UART_IRQ_SELECTION);
+}
+/************************************************** */
+/*   Interrupt handler for LE50 UART interface      */
+/************************************************** */
+void LE50_UART_ISR_HANDLER(void)
+{
+	Chip_UART_IRQRBHandler(LE50_PORT, &le50_rxring, &le50_txring);
+}
+/************************************************** */
+void rf_init()
+{
+	int i;
+	for (i= 0; i< MAX_NUMBER_OF_NODES; i++)
+		rf_node_array[i].isAlive = false;
+
+}
+/************************************************** */
+bool Rf_Task()
+{
+	char recv_buffer[RF_MAX_PACKET_SIZE];
+	memset(recv_buffer, 0, RF_MAX_PACKET_SIZE);
+	if(Get_UartLine(LE50_PORT, &le50_rxring,  recv_buffer, RF_MAX_PACKET_SIZE, CHAR_STX, CHAR_CR, 2)){
+			PRINT_K("\nRF port message received\n");
+			PRINT_K(recv_buffer);
+			rf_parse_packet(recv_buffer);
+	}
+     rf_update_alive_status();
+}
+/*************************************/
+void rf_send(char *command)
+{
+	Chip_UART_SendRB(LE50_PORT, &le50_txring, command, strlen(command));
+
+}
+/************************************************/
+uint16_t rf_get_rx_buffer(char *buffer,  uint16_t buffer_size, TIMER_TICK_T idle_timeout)
+{
+	memset(buffer, 0, buffer_size);
+
+    return Chip_UART_ReadRB(LE50_PORT, &le50_rxring, buffer, buffer_size);
+}
+/***************************************************/
+bool rf_parse_packet(char *recv_buffer)
+{
+	RF_NODE_T node;
+	int16_t node_index;
+	uint8_t i=0;
+	char *p_field;
+	char msg_parse_buffer[RF_MAX_PACKET_SIZE];
+	char printBuf[128];
+
+
+	memset(&node, 0, sizeof(RF_NODE_T));
+	for(i = 0; i < sizeof(rf_msg_parser_info) / sizeof(rf_msg_parser_info[0]); i++ ){
+		memcpy(msg_parse_buffer, recv_buffer, RF_MAX_PACKET_SIZE);
+		p_field = strstr(msg_parse_buffer, rf_msg_parser_info[i].str_app_id);
+		if(p_field != NULL)
+			rf_msg_parser_info[i].field_parser_callback(&node, p_field + strlen(rf_msg_parser_info[i].str_app_id), msg_parse_buffer);
+	}
+	node_index = rf_search_node_in_array(&node);
+	if(node_index >=0){
+		sprintf(printBuf, "Node found at index: %d\n", node_index);
+		rf_node_array[node_index] = node;
+		Set_Timer(&rf_node_array[node_index].heartbeat_timer, RF_NODE_ALIVE_TIMEOUT);
+		rf_node_array[node_index].isAlive  = true;
+		PRINT_K(printBuf);
+	}
+	else{
+		PRINT_K("Node not found\n");
+		rf_add_node_to_array(&node);
+
+	}
+/*	node_index = settings_search_node_in_flash_table(node.node_id);
+	if(node_index >=0)*/
+
+}
+/***************************************************/
+static bool parse_rf_module_id_field(RF_NODE_T *node, char *pos, char *buffer)
+{
+	char print_buf[128];
+	PRINT_K("\nIn parse_rf_module_id_field() function\n");
+	memset(node->node_id, 0, LE50_SERIAL_NUMBER_SIZE + 1);
+	memcpy(node->node_id, pos, LE50_SERIAL_NUMBER_SIZE);
+	sprintf(print_buf,"\nModule ID %s\n", node->node_id);
+	PRINT_K(print_buf);
+}
+/***************************************************/
+static bool parse_door_status_field(RF_NODE_T *node, char * pos, char *buffer)
+{
+	if(*pos == '1'){
+		PRINT_K("\nDOOR 1 OPEN\n");
+		node->door_status[0] = true;
+	}
+	else{
+		PRINT_K("\nDOOR 1 CLOSED\n");
+		node->door_status[0] = false;
+	}
+
+	if(*(pos + 2) == '1'){
+		PRINT_K("\nDOOR 2 OPEN\n");
+		node->door_status[1] = true;
+	}
+	else{
+		PRINT_K("\nDOOR 2 CLOSED\n");
+		node->door_status[1] = false;
+	}
+
+}
+/***************************************************/
+static bool parse_temp_value_field(RF_NODE_T *node, char * p_pos, char *buffer)
+{
+	char printBuf[128];
+	char str_temp_val[8];
+	char *p_comma;
+	char *p_end;
+
+	p_end = strchr(p_pos, RF_NODE_MSG_FIELD_SEPERATOR);
+
+    if(p_end != NULL)
+	   *p_end = '\0';
+    else
+    	return false;
+
+	p_comma = strchr(p_pos, ',');
+
+	if(p_comma != NULL){
+		PRINT_K("\n cift kanal");
+		memset(str_temp_val, 0, sizeof(str_temp_val));
+		memcpy(str_temp_val, p_pos, (p_comma - p_pos));
+		node->ds18b20_channel[0] = atoi(str_temp_val);
+		memset(str_temp_val, 0, sizeof(str_temp_val));
+		memcpy(str_temp_val, p_comma+ 1 , (p_end - p_comma));
+		node->ds18b20_channel[1] = atoi(str_temp_val);
+	}
+	else{
+		PRINT_K("\ntek kanal");
+		memset(str_temp_val, 0, sizeof(str_temp_val));
+		memcpy(str_temp_val, p_pos, (p_end - p_comma));
+		node->ds18b20_channel[0] = atoi(str_temp_val);
+	}
+	sprintf(printBuf, "Temp1: %d Temp2: %d\n", node->ds18b20_channel[0],node->ds18b20_channel[1]);
+	PRINT_K(printBuf);
+
+	return true;
+}
+/***************************************************/
+static bool parse_bat_voltage_field(RF_NODE_T *node, char *p_pos, char *buffer)
+{
+	char *p_end;
+	char printBuf[128];
+
+	p_end = strchr(p_pos, RF_NODE_MSG_FIELD_SEPERATOR);
+	 if(p_end != NULL)
+	   *p_end = '\0';
+	 else
+	   return false;
+
+	 node->bat_voltage = atoi(p_pos);
+	 sprintf(printBuf,"Battery voltage %d\n",node->bat_voltage);
+	 PRINT_K(printBuf);
+}
+/***************************************************/
+static bool parse_rssi_field(RF_NODE_T *node, char *p_pos, char *buffer)
+{
+	char printBuf[128];
+	char *p_end;
+
+	p_end = strchr(p_pos, CHAR_CR);
+
+	if(p_end != NULL)
+		*p_end = '\0';
+	else
+		return false;
+	node->rssi = atoi(p_pos);
+	sprintf(printBuf,"RSSI Value: %d\n",node->rssi);
+	PRINT_K(printBuf);
+}
+/************************************************** */
+int16_t rf_search_node_in_array(RF_NODE_T *node)
+{
+	int i;
+	for (i= 0; i< MAX_NUMBER_OF_NODES; i++){
+		if(strcmp(rf_node_array[i].node_id, node->node_id) == 0)
+			return i;
+	}
+	return -1;
+}
+/***************************************************/
+int16_t rf_find_free_node_array_index()
+{
+	int i;
+	for (i= 0; i< MAX_NUMBER_OF_NODES; i++){
+		if(!rf_node_array[i].isAlive)
+			return i;
+	}
+	return -1;
+}
+/***************************************************/
+bool rf_add_node_to_array(RF_NODE_T *node)
+{
+	int16_t node_index;
+	char printBuf[128];
+	node_index = rf_find_free_node_array_index();
+	if(node_index >=0){
+		Set_Timer(&(node->heartbeat_timer), RF_NODE_ALIVE_TIMEOUT);
+		node->isAlive = true;
+		memcpy(&rf_node_array[node_index], node, sizeof(RF_NODE_T));
+		sprintf(printBuf, "Adding node to index: %d\n", node_index);
+		PRINT_K(printBuf);
+		return true;
+	}
+	return false;
+}
+/***************************************************/
+bool rf_get_node_presence_status()
+{
+	int i;
+	for (i= 0; i< MAX_NUMBER_OF_NODES; i++){
+		if(rf_node_array[i].isAlive){
+			PRINT_K("Canli node bulundu\n");
+			return true;
+		}
+	}
+		return false;
+}
+/***************************************************/
+void rf_get_node_in_ram(RF_NODE_T *node, uint16_t index)
+{
+	memcpy(node, &rf_node_array[index], sizeof(RF_NODE_T));
+}
+/***************************************************/
+void rf_update_alive_status()
+{
+	int i;
+   char buffer[128];
+
+	for (i= 0; i< MAX_NUMBER_OF_NODES; i++){
+		if(mn_timer_expired(&rf_node_array[i].heartbeat_timer) && rf_node_array[i].isAlive){
+			rf_node_array[i].isAlive = false;
+			sprintf(buffer,"\n********************NODE AT INDEX %d DEAD*************************\n",i);
+			PRINT_K(buffer);
+		}
+
+
+	}
+}

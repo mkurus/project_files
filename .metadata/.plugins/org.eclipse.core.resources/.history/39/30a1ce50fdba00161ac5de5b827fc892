@@ -1,0 +1,24 @@
+/*
+ * trace.h
+ *
+ *  Created on: 25 Şub 2016
+ *      Author: admin
+ */
+
+#ifndef TRACE_H_
+#define TRACE_H_
+
+#define   SERIAL_DATA_IDLE_TIMEOUT      2
+
+void rfid_msg_recv_callback(char *msg, char *out_msg);
+void set_msg_recv_callback(char *msg, char *out_msg);
+
+void DebugPortTask();
+void TraceCommUART_IsrHandler(void);
+void debug_init();
+void PRINT_K(char *msg);
+void PRINT_G(char *msg);
+void PRINT_GPS(char *gps_msg);
+void PRINT_OFFLINE(char *msg);
+void PRINT_CAN(char *msg);
+#endif /* TRACE_H_ */

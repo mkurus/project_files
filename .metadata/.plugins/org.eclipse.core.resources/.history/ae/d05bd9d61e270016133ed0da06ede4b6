@@ -1,0 +1,134 @@
+/*
+===============================================================================
+ Name        : T2.c
+ Author      : $(author)
+ Version     :
+ Copyright   : $(copyright)
+ Description : main definition
+===============================================================================
+*/
+
+#if defined (__USE_LPCOPEN)
+#if defined(NO_BOARD_LIB)
+#include "chip.h"
+#else
+#include "board.h"
+#include "timer.h"
+#include "bsp.h"
+#include "MMA8652.h"
+#include "sst25.h"
+#include "gSensor.h"
+#include "settings.h"
+#include "gsm.h"
+#include "gps.h"
+#include "i2c.h"
+#include "io_ctrl.h"
+#include "spi.h"
+#include "status.h"
+#include "onewire.h"
+#include "can.h"
+#include "adc.h"
+#include "messages.h"
+#include "offline.h"
+#include "trace.h"
+#include "ProcessTask.h"
+#include "string.h"
+#endif
+#endif
+
+#include <cr_section_macros.h>
+
+void InitBODReset();
+
+int main(void)
+{
+	char printBuf[256];
+	SystemCoreClockUpdate();
+    SysTick_Config(SystemCoreClock / TICKRATE_HZ1);
+    InitBODReset();
+    debug_init();
+    PRINT_K("\n******************Starting-up T2*****************\n");
+    PRINT_K(VERSION);
+    PRINT_K("\n*************************************************\n");
+    sprintf(printBuf, "\nSystem Clock Freq:%d\n",Chip_Clock_GetSystemClockRate());
+    PRINT_K(printBuf);
+    gpio_init();
+    status_task_init();
+    sst25_init();
+    offline_data_init();
+    Init_DriverProfileTask();
+    load_user_settings();
+    Load_UserSettings();
+    gps_init(GPS_INITIAL_BAUD_RATE);
+    onewire_init();
+
+    can_init();
+    i2c_init();
+    mma865x_init();
+    adc_init();
+
+ /* Load_BlockageSetting(); commented out for testing purpose */
+    gsm_init();
+    PRINT_K("\nSet NMEA output frequency to 10 Hz...");
+    gps_set_nmea_msg_freq(100);
+    PRINT_K("Done\n");
+
+    Process_Task();
+
+  /*  while(1){
+    if(mn_timer_expired(&HEARTBEAT_TIMER1)){
+    			MMA865x_Read_Accel_Values(&mma8652_accel_values);
+    			gInputBuffer[gSampleCount] = mma8652_accel_values;
+
+    			if(gSampleCount == MOVING_AVG_WINDOW_SIZE - 1){
+    				forwardAccAnalyzeBuffer[i] = MovingAverage(gInputBuffer);
+    				sprintf(printBuf, "%f,%f,%f,%f,%f,%f\n",gInputBuffer[gSampleCount].xAccel,
+    														gInputBuffer[gSampleCount].yAccel,
+															gInputBuffer[gSampleCount].zAccel,
+															forwardAccAnalyzeBuffer[i].xAccel,
+															forwardAccAnalyzeBuffer[i].yAccel,
+															forwardAccAnalyzeBuffer[i].zAccel);
+    				PRINT_K(printBuf);
+
+
+    				ShiftBuffer(gInputBuffer, MOVING_AVG_WINDOW_SIZE);
+    				 if(i == (FORWARD_ACC_ANALYZE_BUFFER_SIZE - 1)){
+    					 if(CheckSuddenAccelAlarm(forwardAccAnalyzeBuffer, FORWARD_ACC_ANALYZE_BUFFER_SIZE, SUDDEN_ACCL_THREHOLD_VALUE))
+    						 PRINT_K("\nAni Hizlanma Alarmi\n");
+    					 ShiftBuffer(forwardAccAnalyzeBuffer, FORWARD_ACC_ANALYZE_BUFFER_SIZE);
+    				 }
+
+
+    				 else
+    					i++;
+    			}
+    			else
+    			    gSampleCount++;
+    			Set_Timer(&HEARTBEAT_TIMER1, 10);
+    	}
+    }*/
+    Process_Task();
+
+    return 0;
+}
+/*******************************************************************/
+void InitBODReset()
+{
+	Chip_SYSCTL_EnableBODReset();
+}
+/*******************************************************************/
+/*void Init_Debug()
+{
+
+	Chip_UART_Init(LPC_UART0);
+	Chip_UART_SetBaud(LPC_UART0, 115200 );
+	Chip_UART_ConfigData(LPC_UART0, UART_LCR_WLEN8 | UART_LCR_SBS_1BIT | UART_LCR_PARITY_DIS);
+
+
+	Chip_UART_TXEnable(LPC_UART0);
+}
+
+*/
+
+
+

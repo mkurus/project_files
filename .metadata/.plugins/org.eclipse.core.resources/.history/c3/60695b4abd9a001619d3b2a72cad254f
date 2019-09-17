@@ -1,0 +1,29 @@
+/*
+ * rf_task.h
+ *
+ *  Created on: 24 Eki 2016
+ *      Author: admin
+ */
+
+#ifndef RF_TASK_H_
+#define RF_TASK_H_
+
+
+
+#define     LE50_UART_RRB_SIZE      256
+#define     LE50_UART_SRB_SIZE      256
+#define		RF_MAX_PACKET_SIZE      128
+#define     RF_PACKET_TIMEOUT       100
+
+typedef struct APP_ID_INFO
+{
+	APP_ID_T app_id;
+	bool (*app_id_parse_callback)(char *buffer);
+}APP_ID_INFO_T;
+
+void rf_uart_init();
+void rf_send(char *command);
+bool rf_parse_packet(char *recv_buffer);
+uint16_t rf_get_rx_buffer(char *buffer,  uint16_t buffer_size, TIMER_TICK_T idle_timeout);
+bool Rf_Task();
+#endif /* RF_TASK_H_ */

@@ -1,0 +1,900 @@
+#include "chip.h"
+#include "board.h"
+#include "adc.h"
+#include "gps.h"
+#include "io_ctrl.h"
+#include "MMA8652.h"
+#include "gSensor.h"
+#include "timer.h"
+#include "settings.h"
+#include "messages.h"
+#include "offline.h"
+#include "status.h"
+#include "trace.h"
+#include "event.h"
+#include "utils.h"
+#include "gsm.h"
+#include <string.h>
+#include <stdlib.h>
+
+/* call back functions for pin interrupts */
+void ign_high_callback();
+void ign_low_callback();
+void sim_high_callback();
+void sim_low_callback();
+void pwr_high_callback();
+void pwr_low_callback();
+void din1_high_callback();
+void din2_high_callback();
+void din3_high_callback();
+void din4_high_callback();
+void din5_high_callback();
+void din6_high_callback();
+void din1_low_callback();
+void din2_low_callback();
+void din3_low_callback();
+void din4_low_callback();
+void din5_low_callback();
+void din6_low_callback();
+
+
+#define IGN_DEBOUNCE_TIME               (1 * SECOND)
+#define SIM_DEBOUNCE_TIME               10
+#define PWR_DEBOUNCE_TIME               10
+#define DIGINPUT_DEBOUNCE_TIME          10
+
+#define Gpio_PinInt_Handler  			EINT3_IRQHandler/* GPIO interrupt IRQ function name */
+#define GPIO_PININT_NVIC_NAME           EINT3_IRQn	    /* GPIO interrupt NVIC interrupt name */
+
+
+
+TIMER_INFO_T ign_debounce_timer;
+TIMER_INFO_T sim_debounce_timer;
+TIMER_INFO_T pwr_debounce_timer;
+TIMER_INFO_T din1_debounce_timer;
+TIMER_INFO_T din2_debounce_timer;
+TIMER_INFO_T din3_debounce_timer;
+TIMER_INFO_T din4_debounce_timer;
+TIMER_INFO_T din5_debounce_timer;
+TIMER_INFO_T din6_debounce_timer;
+
+BLOCKAGE_INFO_T blockage_info;
+SIM_STATUS_INFO sim_status_info;
+PWR_STATUS_INFO pwr_status_info;
+TRIP_INFO_T trip_info;
+EVENT_INFO_T event_info;
+SPEED_LIMIT_INFO speed_limit_info;
+IDLE_INFO idle_info;
+STOP_INFO stop_info;
+DIGINPUT_INFO  din_info[] = {
+		{ DIN_LOW_STATE, FALSE, FALSE, FALSE, &ign_debounce_timer,  ign_high_callback,  ign_low_callback},
+		{ DIN_LOW_STATE, FALSE, FALSE, FALSE, &sim_debounce_timer,  sim_high_callback,  sim_low_callback},
+		{ DIN_LOW_STATE, FALSE, FALSE, FALSE, &pwr_debounce_timer,  pwr_high_callback,  pwr_low_callback},
+		{ DIN_LOW_STATE, FALSE, FALSE, FALSE, &din1_debounce_timer, din1_high_callback, din1_low_callback},
+		{ DIN_LOW_STATE, FALSE, FALSE, FALSE, &din2_debounce_timer, din2_high_callback, din2_low_callback},
+		{ DIN_LOW_STATE, FALSE, FALSE, FALSE, &din3_debounce_timer, din3_high_callback, din3_low_callback},
+		{ DIN_LOW_STATE, FALSE, FALSE, FALSE, &din4_debounce_timer, din4_high_callback, din4_low_callback},
+		{ DIN_LOW_STATE, FALSE, FALSE, FALSE, &din5_debounce_timer, din5_high_callback, din5_low_callback},
+		{ DIN_LOW_STATE, FALSE, FALSE, FALSE, &din6_debounce_timer, din6_high_callback, din6_low_callback}
+};
+
+TIMER_INFO_T timer1;
+void EnableSimDetectInterrupt();
+void EnableIgnDetectInterrupt();
+void EnablePwrDetectInterrupt();
+//void EnableDinInterrupt(DETECT_CFG  const *din_cfg);
+static void ProcessBlockage();
+static void ProcessIdleStatus();
+static void ProcessSpeedLimitStatus();
+static void ProcessStopTimeStatus();
+static void ProcessDigitalInputs();
+static void IncreaseIdleTimeCounters();
+static void ProcessLDRStatus(void);
+void ResetSpeedViolationTime();
+
+/* configuration for ignition detection */
+static const DIN_HW_CFG_T  const ign_cfg =  {IGN_DETECT_PORT_NUM, IGN_DETECT_PIN_NUM ,SECOND};
+/* configuration for sim presence detection  */
+static const DIN_HW_CFG_T  const sim_cfg =  {SIM_DETECT_PORT_NUM, SIM_DETECT_PIN_NUM, 10};
+/* configuration for power sense detection */
+static const DIN_HW_CFG_T  const pwr_cfg =  {PWR_DETECT_PORT_NUM, PWR_DETECT_PIN_NUM, 100};
+/* configuration for digital input 1  */
+static const DIN_HW_CFG_T  const din1_cfg = {DIN1_PORT_NUM, DIN1_PIN_NUM,  100};
+/* configuration for digital input 2  */
+static const DIN_HW_CFG_T  const din2_cfg = {DIN2_PORT_NUM, DIN2_PIN_NUM,  100};
+/* configuration for digital input 3  */
+static const DIN_HW_CFG_T  const din3_cfg = {DIN3_PORT_NUM, DIN3_PIN_NUM,  100};
+/* configuration for digital input 4  */
+static const DIN_HW_CFG_T  const din4_cfg = {DIN4_PORT_NUM, DIN4_PIN_NUM,  100};
+/* configuration for digital input 5  */
+static const DIN_HW_CFG_T  const din5_cfg = {DIN5_PORT_NUM, DIN5_PIN_NUM,  100};
+/* configuration for digital input 6  */
+static const DIN_HW_CFG_T  const din6_cfg = {DIN6_PORT_NUM, DIN6_PIN_NUM,  100};
+
+static const DIN_HW_CFG_T  const *detect_hw_cfg[] = {
+		&ign_cfg,
+		&sim_cfg,
+		&pwr_cfg,
+		&din1_cfg,
+		&din2_cfg,
+		&din3_cfg,
+		&din4_cfg,
+		&din5_cfg,
+		&din6_cfg };
+
+/****************************************************************/
+/*__attribute__((short_call))
+void __attribute__ ((noinline)) Gpio_PinInt_Handler(void)
+{
+	uint32_t u32_riseStatesGpio0;
+	uint32_t u32_fallStatesGpio0;
+	uint32_t u32_riseStatesGpio2;
+	uint32_t u32_fallStatesGpio2;
+	uint8_t i;
+
+	u32_fallStatesGpio0 = Chip_GPIOINT_GetStatusFalling(LPC_GPIOINT, GPIOINT_PORT0);
+	u32_riseStatesGpio0 = Chip_GPIOINT_GetStatusRising(LPC_GPIOINT, GPIOINT_PORT0);
+	u32_fallStatesGpio2 = Chip_GPIOINT_GetStatusFalling(LPC_GPIOINT, GPIOINT_PORT2);
+	u32_riseStatesGpio2 = Chip_GPIOINT_GetStatusRising(LPC_GPIOINT, GPIOINT_PORT2);
+
+	for(i = 0; i< sizeof(detect_cfg) / sizeof(detect_cfg[0]); i++){
+		if(detect_cfg[i]->port == GPIOINT_PORT0){
+			if(u32_riseStatesGpio0 & PININT(detect_cfg[i]->pin))
+				detect_cfg[i]->rise_int_callback();
+			if(u32_fallStatesGpio0 & PININT(detect_cfg[i]->pin))
+				detect_cfg[i]->fall_int_callback();
+		}
+		if(detect_cfg[i]->port == GPIOINT_PORT2){
+			if(u32_riseStatesGpio2 & PININT(detect_cfg[i]->pin))
+				detect_cfg[i]->rise_int_callback();
+			if(u32_fallStatesGpio2 & PININT(detect_cfg[i]->pin))
+				detect_cfg[i]->fall_int_callback();
+		}
+	}
+}*/
+/**************************************************************/
+void din1_high_callback()
+{
+	din_info[3].b_value = TRUE;
+	if(Get_PwrDetectPinStatus()){
+		PRINT_K("Digital Input 1 : HIGH\n");
+		event_info.diginput_event[0].event_digital_input_low_to_high = TRUE;
+	}
+}
+void din1_low_callback()
+{
+	din_info[3].b_value = FALSE;
+	if(!Get_PwrDetectPinStatus()){
+		PRINT_K("Digital Input 1 : LOW\n");
+		event_info.diginput_event[0].event_digital_input_high_to_low = TRUE;
+	}
+}
+/**************************************************************/
+void din2_high_callback()
+{
+	din_info[4].b_value = TRUE;
+	if(Get_PwrDetectPinStatus()){
+		PRINT_K("Digital Input 2 : HIGH\n");
+		event_info.diginput_event[1].event_digital_input_low_to_high = TRUE;
+	}
+}
+void din2_low_callback()
+{
+	din_info[4].b_value = FALSE;
+	if(!Get_PwrDetectPinStatus()){
+		PRINT_K("Digital Input 2 : LOW\n");
+		event_info.diginput_event[1].event_digital_input_high_to_low = TRUE;
+	}
+}
+/**************************************************************/
+void din3_high_callback()
+{
+	din_info[5].b_value = TRUE;
+	if(Get_PwrDetectPinStatus()){
+		PRINT_K("\nDigital Input 3 : HIGH\n");
+		event_info.diginput_event[2].event_digital_input_low_to_high = TRUE;
+	}
+}
+void din3_low_callback()
+{
+    din_info[5].b_value = FALSE;
+    if(!Get_PwrDetectPinStatus()){
+    	PRINT_K("\nDigital Input 3 : LOW\n");
+    	event_info.diginput_event[2].event_digital_input_high_to_low = TRUE;
+    }
+}
+/**************************************************************/
+void din4_high_callback()
+{
+	din_info[6].b_value = TRUE;
+	if(Get_PwrDetectPinStatus()){
+		event_info.diginput_event[3].event_digital_input_low_to_high = TRUE;
+		PRINT_K("\nDigital Input 4 : HIGH\n");
+	}
+}
+void din4_low_callback()
+{
+	din_info[6].b_value = FALSE;
+	if(!Get_PwrDetectPinStatus()){
+		PRINT_K("\nDigital Input 4 : LOW\n");
+		event_info.diginput_event[3].event_digital_input_high_to_low = TRUE;
+	}
+}
+/**************************************************************/
+void din5_high_callback()
+{
+	PRINT_K("\nDigital Input 5 : HIGH\n");
+	din_info[7].b_value = TRUE;
+	event_info.diginput_event[4].event_digital_input_low_to_high = TRUE;
+
+}
+void din5_low_callback()
+{
+	PRINT_K("\nDigital Input 5 : LOW\n");
+	din_info[7].b_value = FALSE;
+	event_info.diginput_event[4].event_digital_input_high_to_low = TRUE;
+}
+/**************************************************************/
+void din6_high_callback()
+{
+	PRINT_K("\nDigital Input 6 : HIGH\n");
+	din_info[8].b_value = TRUE;
+	event_info.diginput_event[5].event_digital_input_low_to_high = TRUE;
+}
+void din6_low_callback()
+{
+	PRINT_K("\nDigital Input 6 : LOW\n");
+	din_info[8].b_value = FALSE;
+	event_info.diginput_event[5].event_digital_input_high_to_low = TRUE;
+}
+/**************************************************************/
+void sim_high_callback()
+{
+	din_info[1].b_value = TRUE;
+	PRINT_K("\n********************SIM YERLESTIRILDI**********************\n");
+}
+void sim_low_callback()
+{
+	din_info[1].b_value = FALSE;
+	event_info.event_sim_card_removed = TRUE;
+	PRINT_K("\n*********************SIM CIKARILDI*************************\n");
+
+}
+/**************************************************************/
+void ign_high_callback()
+{
+	RMC_MESSAGE_T rmc_info;
+
+	gps_get_rmc_info(&rmc_info);
+	din_info[0].b_value = TRUE;
+	event_info.event_ignition_changed_off_to_on = TRUE;
+	offline_refresh_message_timer();
+	gsm_refresh_message_timer();
+	if(rmc_info.status == NMEA_GPRMC_VALID)
+		Init_TripInfo(VALID_GPS_ON_IGNITION);
+	else
+		Init_TripInfo(INVALID_GPS_ON_IGNITION);
+	Init_IdleInfo();
+	PRINT_K("\n************************KONTAK ACILDI****************************\n");
+}
+/**************************************************************/
+void ign_low_callback()
+{
+	GPS_POSITION_DATA_T current_position;
+
+	din_info[0].b_value = FALSE;
+
+	event_info.event_ignition_changed_on_to_off = TRUE;
+	offline_refresh_message_timer();
+	gsm_refresh_message_timer();
+	gps_get_position_info(&current_position);
+	trip_info.u32_tripEndKm = current_position.distance;
+	PRINT_K("\n**********************KONTAK KAPANDI**************************\n");
+
+}
+/**************************************************************/
+void pwr_high_callback()
+{
+	PRINT_K("\n************************HARICI GUC KESILDI***********************\n");
+	event_info.event_power_status_changed = TRUE;
+	din_info[2].b_value = TRUE;
+}
+void pwr_low_callback()
+{
+	PRINT_K("\n************************HARICI GUC BAGLANDI***********************\n");
+	event_info.event_power_status_changed = TRUE;
+	din_info[2].b_value = FALSE;
+}
+bool Get_ExtPowerStatus()
+{
+	return din_info[2].b_value;
+}
+/***************************************************************/
+static void ProcessDigitalInputs()
+{
+	uint8_t i;
+
+	for(i = 0; i< sizeof(detect_hw_cfg)/sizeof(detect_hw_cfg[0]); i++){
+
+		din_info[i].b_currentStatus = Get_DinStatus(detect_hw_cfg[i]);
+		if(din_info[i].b_currentStatus != din_info[i].b_prevStatus){
+			Set_Timer(din_info[i].debounce_timer, detect_hw_cfg[i]->debounceTime);
+			din_info[i].b_prevStatus = din_info[i].b_currentStatus;
+		}
+
+		switch(din_info[i].state){
+		 	 case DIN_HIGH_STATE:
+		 		if(!din_info[i].b_currentStatus){
+		 			if(mn_timer_expired(din_info[i].debounce_timer)){
+		 			//	PRINT_K("\nDIN LOWED\n");
+		 				din_info[i].state = DIN_LOW_STATE;
+		 				din_info[i].low_callback();
+		 			}
+		 		}
+			 break;
+
+		 	 case DIN_LOW_STATE:
+		 		if(din_info[i].b_currentStatus){
+		 			if(mn_timer_expired(din_info[i].debounce_timer)){
+		 				//PRINT_K("\nDIN HIGHED\n");
+		 				 din_info[i].state = DIN_HIGH_STATE;
+		 				 din_info[i].high_callback();
+		 			}
+		 		}
+		 	 break;
+		}
+	}
+}
+/**************************************************************/
+bool Init_DigitalInputs()
+{
+	uint8_t i;
+
+	for(i = 0; i< sizeof(detect_hw_cfg)/sizeof(detect_hw_cfg[0]); i++){
+		if(Get_DinStatus(detect_hw_cfg[i])){
+			din_info[i].b_currentStatus = TRUE;
+			din_info[i].b_prevStatus = TRUE;
+			din_info[i].b_value = TRUE;
+			din_info[i].state = DIN_HIGH_STATE;
+		/*	if(i == 0)
+				PRINT_K("\navavavaav\n");*/
+		}
+		else{
+			din_info[i].b_currentStatus = FALSE;
+			din_info[i].b_prevStatus = FALSE;
+			din_info[i].b_value = FALSE;
+			din_info[i].state = DIN_LOW_STATE;
+		/*	if(i == 0)
+							PRINT_K("\nbbgbbgghv\n");*/
+		}
+	}
+	ProcessDigitalInputs();
+	return TRUE;
+}
+/**************************************************************/
+/*void EnableDinInterrupt(DETECT_CFG  const *din_cfg)
+{
+	Chip_GPIOINT_SetIntFalling(LPC_GPIOINT, din_cfg->port, PININT(din_cfg->port));
+	Chip_GPIOINT_SetIntRising(LPC_GPIOINT,  din_cfg->port, PININT(din_cfg->port));
+	NVIC_EnableIRQ(GPIO_PININT_NVIC_NAME);
+}*/
+/*************************************************************/
+bool Get_DinStatus(DIN_HW_CFG_T  const *din_cfg)
+{
+	if(!Chip_GPIO_GetPinState(LPC_GPIO, din_cfg->port, din_cfg->pin))
+		return TRUE;
+	else
+		return FALSE;
+}
+/**************************************************************/
+bool Get_IgnitionPinStatus()
+{
+	if(!Chip_GPIO_GetPinState(LPC_GPIO, IGN_DETECT_PORT_NUM, IGN_DETECT_PIN_NUM))
+		return TRUE;   /* ignited */
+	else
+		return FALSE;  /* not ignited */
+
+}
+/*************************************************************/
+void EnableIgnDetectInterrupt()
+{
+	/* Initialize pin interrupt */
+	Chip_GPIOINT_SetIntFalling(LPC_GPIOINT, IGN_DETECT_PORT_NUM, PININT(IGN_DETECT_PIN_NUM));
+	Chip_GPIOINT_SetIntRising(LPC_GPIOINT,  IGN_DETECT_PORT_NUM, PININT(IGN_DETECT_PIN_NUM));
+	NVIC_EnableIRQ(GPIO_PININT_NVIC_NAME);
+}
+/*************************************************************/
+bool Get_IgnitionStatus()
+{
+	return din_info[0].b_value;
+}
+/*************************************************************/
+bool Get_SimDetectPinStatus()
+{
+	if(Chip_GPIO_GetPinState(LPC_GPIO, SIM_DETECT_PORT_NUM, SIM_DETECT_PIN_NUM))
+		return TRUE;        /* sim inserted */
+	else
+		return FALSE;
+}
+/**************************************************************/
+bool Get_PwrDetectPinStatus()
+{
+	if(!Chip_GPIO_GetPinState(LPC_GPIO, PWR_DETECT_PORT_NUM, PWR_DETECT_PIN_NUM))
+		return TRUE;   /* powered */
+	else
+		return FALSE;  /* power removed */
+
+}
+/**************************************************************/
+static void ProcessIdleStatus()
+{
+	FLASH_SETTINGS_T user_settings;
+	RMC_MESSAGE_T rmc_info;
+	GGA_MESSAGE_T gga_info;
+	GSA_MESSAGE_T gsa_info;
+	uint32_t idleTimeSetValue;
+	uint16_t gpsSpeed;
+
+	gps_get_gga_info(&gga_info);
+	gps_get_gsa_info(&gsa_info);
+	if((gsa_info.mode2 != NMEA_GPGSA_MODE2_3D) || (!gga_info.position_fix))
+		return;
+
+	Get_UserSettings(&user_settings);
+	gps_get_rmc_info(&rmc_info);
+
+	gpsSpeed = rmc_info.speed * 1852 /1000;
+	idleTimeSetValue = user_settings.u32_maxIdleTime;
+
+	switch(idle_info.state)
+	{
+		case IDLE_STATE:
+		if(gpsSpeed > IDLE_SPEED_THRESHOLD){
+			idle_info.state = NOT_IDLE_STATE;
+			PRINT_K("Out of Idle State\n");
+			event_info.event_idle_time_finished = SET;
+		}
+		else if(mn_timer_expired(&idle_info.idle_secs_counter_timer)){
+				IncreaseIdleTimeCounters();
+				Set_Timer(&idle_info.idle_secs_counter_timer, SECOND);
+		}
+		break;
+
+		case WAITING_IDLE_TIMEOUT_STATE:
+		if(gpsSpeed > IDLE_SPEED_THRESHOLD){
+			idle_info.state = NOT_IDLE_STATE;
+			ResetTotalIdleTime();
+			PRINT_K("Timeout beklerken hareket edildi\n");
+		}
+		else{
+			if(mn_timer_expired(&(idle_info.idle_alarm_timer))){
+				event_info.event_idle_time_started = SET;
+				PRINT_K("Idle Timeout alarmi olustu\n");
+				idle_info.state = IDLE_STATE;
+			}
+			else if(mn_timer_expired(&idle_info.idle_secs_counter_timer)){
+				IncreaseIdleTimeCounters();
+				Set_Timer(&idle_info.idle_secs_counter_timer, SECOND);
+			}
+		}
+		break;
+
+		case NOT_IDLE_STATE:
+		if(gpsSpeed <= IDLE_SPEED_THRESHOLD){
+			Set_Timer(&idle_info.idle_secs_counter_timer, SECOND);
+			Set_Timer(&(idle_info.idle_alarm_timer), idleTimeSetValue *100);
+			idle_info.state = WAITING_IDLE_TIMEOUT_STATE;
+			PRINT_K("Waiting Idle Timeout\n");
+		}
+		break;
+	}
+}
+/**************************************************************/
+bool Init_IdleInfo()
+{
+	FLASH_SETTINGS_T user_settings;
+	Get_UserSettings(&user_settings);
+
+	idle_info.state = WAITING_IDLE_TIMEOUT_STATE;
+	idle_info.u32_totalIdleTime = 0;
+	idle_info.u16_idleTimeBetweenMessage = 0;
+
+	Set_Timer(&idle_info.idle_alarm_timer, user_settings.u32_maxIdleTime * SECOND);
+	Set_Timer(&idle_info.idle_secs_counter_timer, SECOND);
+	return TRUE;
+}
+/**************************************************************/
+void IncreaseIdleTimeCounters()
+{
+	idle_info.u32_totalIdleTime++;
+	trip_info.u32_totalTripIdleTime++;
+	idle_info.u16_idleTimeBetweenMessage++;
+}
+/**************************************************************/
+void ResetTotalIdleTime()
+{
+	idle_info.u32_totalIdleTime = 0;
+}
+/**************************************************************/
+void ProcessSpeedLimitStatus()
+{
+	FLASH_SETTINGS_T user_settings;
+	RMC_MESSAGE_T rmc_info;
+	uint16_t u16_speedLimit, timeout;
+	uint16_t gpsSpeed;
+
+	Get_UserSettings(&user_settings);
+	gps_get_rmc_info(&rmc_info);
+
+	u16_speedLimit = user_settings.u16_speedLimit;
+	timeout =  user_settings.u16_speedLimitViolationDuration;
+	gpsSpeed = rmc_info.speed * 1852 /1000;
+
+	switch(speed_limit_info.state)
+	{
+		case BELOW_SPEED_LIMIT_STATE:
+		if(gpsSpeed > u16_speedLimit){
+			PRINT_K("Hiz limiti asildi\n");
+			Set_Timer(&(speed_limit_info.speed_alarm_timer), timeout * SECOND);
+			Set_Timer(&speed_limit_info.speed_secs_counter_timer, SECOND);
+			speed_limit_info.state = WAIT_SPEED_ALARM_TIMEOUT_STATE;
+		}
+		break;
+
+		case WAIT_SPEED_ALARM_TIMEOUT_STATE:
+		if(gpsSpeed <= u16_speedLimit){
+			speed_limit_info.state = BELOW_SPEED_LIMIT_STATE;
+			ResetSpeedViolationTime();
+		/*	PRINT_K("\r\nTimeout beklerken hiz limitini altina inildi\r\n");*/
+		}
+		else if(mn_timer_expired(&speed_limit_info.speed_alarm_timer)) {
+			event_info.event_speed_limit_violation_started = SET;
+			speed_limit_info.state = ABOVE_SPEED_LIMIT_STATE;
+			PRINT_K("Hiz limiti timeout\n");
+		}
+		if(mn_timer_expired(&speed_limit_info.speed_secs_counter_timer)){
+			speed_limit_info.u32_totalSpeedViolationTime++;
+			Set_Timer(&speed_limit_info.speed_secs_counter_timer, SECOND);
+		}
+		break;
+
+		case ABOVE_SPEED_LIMIT_STATE:
+		if(gpsSpeed <= u16_speedLimit){
+			PRINT_K("Hiz limitinin altina inildi\n");
+			speed_limit_info.state = BELOW_SPEED_LIMIT_STATE;
+			event_info.event_speed_limit_violation_finished = SET;
+		}
+		else{
+			if(mn_timer_expired(&speed_limit_info.speed_secs_counter_timer)){
+				speed_limit_info.u32_totalSpeedViolationTime++;
+				Set_Timer(&speed_limit_info.speed_secs_counter_timer, SECOND);
+			}
+		}
+		break;
+
+	}
+}
+/*************************************************************/
+bool Init_SpeedLimitInfo()
+{
+	speed_limit_info.state = BELOW_SPEED_LIMIT_STATE;
+	speed_limit_info.u32_totalSpeedViolationTime = 0;
+    Set_Timer(&speed_limit_info.speed_secs_counter_timer, SECOND);
+    return TRUE;
+}
+/*************************************************************/
+void ResetSpeedViolationTime()
+{
+	speed_limit_info.u32_totalSpeedViolationTime = 0;
+}
+/************************************************************************/
+static void ProcessStopTimeStatus()
+{
+	FLASH_SETTINGS_T user_settings;
+
+	Get_UserSettings(&user_settings);
+
+	if(user_settings.u32_maxStopTime <= 0)
+		return;
+
+	switch(stop_info.state){
+		case STOPPED_STATE:
+		if(Get_IgnitionStatus()){
+			stop_info.state = NOT_STOPPED_STATE;
+			PRINT_K("Out of Stop State\n");
+			event_info.event_stop_time_finished = SET;
+		}
+		else if(mn_timer_expired(&stop_info.stop_secs_counter_timer)){
+				stop_info.u32_totalStopTime++;
+				Set_Timer(&stop_info.stop_secs_counter_timer, SECOND);
+		}
+		break;
+
+		case WAITING_STOP_TIMEOUT_STATE:
+		if(Get_IgnitionStatus()){
+			stop_info.state = NOT_STOPPED_STATE;
+			ResetStopTime();
+			PRINT_K("Timeout beklerken kontak acildi\n");
+		}
+		else{
+			if(mn_timer_expired(&stop_info.stop_alarm_timer)) {
+				event_info.event_stop_time_started = SET;
+				stop_info.state = STOPPED_STATE;
+			}
+			else if(mn_timer_expired(&stop_info.stop_secs_counter_timer)){
+				stop_info.u32_totalStopTime++;
+				Set_Timer(&stop_info.stop_secs_counter_timer, SECOND);
+			}
+		}
+		break;
+
+		case NOT_STOPPED_STATE:
+		if(!Get_IgnitionStatus()){
+			Set_Timer(&stop_info.stop_alarm_timer, user_settings.u32_maxStopTime * SECOND);
+			Set_Timer(&stop_info.stop_secs_counter_timer,  SECOND);
+			stop_info.state = WAITING_STOP_TIMEOUT_STATE;
+			PRINT_K("Waiting Stop Timeout\n");
+		}
+		break;
+	}
+}
+/************************************************************************/
+static void ProcessBlockage()
+{
+	RMC_MESSAGE_T rmc_info;
+	GGA_MESSAGE_T gga_info;
+
+	gps_get_gga_info(&gga_info);
+	gps_get_rmc_info(&rmc_info);
+
+	if(blockage_info.blockageStatus ==  BLOCKAGE_REQUESTED){
+		if(!Get_IgnitionStatus() && (rmc_info.status == NMEA_GPRMC_VALID) &&
+				(rmc_info.speed *1852/1000 == 0) &&  (gga_info.position_fix) &&
+				(gga_info.satellites >= MIN_NUMBER_OF_SATS_FOR_BLOCKAGE) ){
+			SetBlockage(TRUE);
+			Set_BlockageStatus(BLOCKAGE_ACTIVATED);
+			PRINT_K("\nBLOCKAGE ACTIVATED\n");
+		}
+	}
+	else if(blockage_info.blockageStatus ==  BLOCKAGE_REMOVE_REQUESTED){
+		SetBlockage(FALSE);
+		Set_BlockageStatus(BLOCKAGE_REMOVED);
+		PRINT_K("\nBLOCKAGE REMOVED\n");
+	}
+
+
+	/* Flash içerisinde ayrı bir değişkende kullanıcı ayarlarına göre blokaj yapılıp yapılmayacağı tutulacak.*/
+	/* Bu ayar false ise blokaj ayarı sadece RAM'den okunacak*/
+}
+/************************************************************************/
+void SetBlockage(bool blockageStatus)
+{
+	Chip_GPIO_SetPinState(LPC_GPIO, P_ROLE_PORT_NUM, P_ROLE_PIN_NUM, blockageStatus);
+}
+/**************************************************************/
+bool Init_StopInfo()
+{
+	FLASH_SETTINGS_T user_settings;
+	Get_UserSettings(&user_settings);
+	if(Get_IgnitionStatus())
+		stop_info.state = NOT_STOPPED_STATE;
+	else
+		stop_info.state = STOPPED_STATE;
+	stop_info.u32_totalStopTime = 0;
+	Set_Timer(&stop_info.stop_alarm_timer, user_settings.u32_maxStopTime * SECOND);
+	return TRUE;
+}
+/**************************************************************/
+void Init_TripInfo(GPS_TRIP_STATUS_T status)
+{
+	GPS_POSITION_DATA_T current_position;
+
+	gps_get_position_info(&current_position);
+
+	memset(trip_info.tripStartInfoBuffer, 0, TRIP_START_INFO_BUFFER_SIZE);
+	Trio_StartTripInfoMessage(trip_info.tripStartInfoBuffer);
+
+	trip_info.u32_totalTripIdleTime = 0;
+	trip_info.u32_tripStartKm = current_position.distance;
+	trip_info.gpsStatus = status;
+}
+/**************************************************************/
+void ResetStopTime()
+{
+	stop_info.u32_totalStopTime = 0;
+}
+/**************************************************************/
+TIMER_TICK_T GetInterMessageIdleTime()
+{
+	return idle_info.u16_idleTimeBetweenMessage;
+}
+/**************************************************************/
+TIMER_TICK_T GetTotalIdleTime()
+{
+	return idle_info.u32_totalIdleTime;
+}
+/**************************************************************/
+TIMER_TICK_T GetStopTime()
+{
+	return stop_info.u32_totalStopTime;
+}
+/**************************************************************/
+TIMER_TICK_T GetSpeedViolationDuration()
+{
+	return speed_limit_info.u32_totalSpeedViolationTime;
+}
+/**************************************************************/
+uint32_t Get_TripIdleTime()
+{
+	return trip_info.u32_totalTripIdleTime;
+}
+/**************************************************************/
+uint32_t Get_TripDistance()
+{
+	return trip_info.u32_tripEndKm - trip_info.u32_tripStartKm;
+}
+/**************************************************************/
+char * Get_TripStartInfoBufferPtr()
+{
+	return trip_info.tripStartInfoBuffer;
+}
+/**************************************************************/
+void ResetInterMessageIdleTime()
+{
+	idle_info.u16_idleTimeBetweenMessage = 0;
+}
+/*************************************************************/
+bool Get_EventStatus()
+{
+	uint8_t *u8_eventByte;
+	uint8_t i;
+
+	u8_eventByte = (uint8_t *)&event_info;
+	/* check each byte of event status info */
+	for(i = 0; i < sizeof(event_info); i++){
+		if(*u8_eventByte != 0)
+			return TRUE;
+		u8_eventByte++;
+	}
+	return FALSE;
+}
+/*************************************************************/
+void Get_BlockageInfo(BLOCKAGE_INFO_T *blockage)
+{
+	memcpy(blockage, &blockage_info, sizeof(BLOCKAGE_INFO_T));
+}
+/*************************************************************/
+void Get_EventInfo(EVENT_INFO_T *eventInfoContainer)
+{
+	memcpy(eventInfoContainer, &event_info, sizeof(EVENT_INFO_T));
+}
+/*************************************************************/
+void Clear_Events()
+{
+	memset(&event_info, 0, sizeof(event_info));
+}
+/*************************************************************/
+GPS_TRIP_STATUS_T Get_TripGpsStatus()
+{
+	return trip_info.gpsStatus;
+}
+/**************************************************************/
+uint32_t GetStatusWord()
+{
+
+	GSM_INFO_T gsm_info;
+	RMC_MESSAGE_T rmc_info;
+	uint32_t u32_status = 0;
+
+	Get_GsmInfo(&gsm_info);
+	gps_get_rmc_info(&rmc_info);
+
+	if(Get_IgnitionStatus())
+		SetBit(&u32_status, (uint32_t)IGNITION_BIT_POS);
+	else
+		ResetBit(&u32_status, (uint32_t)IGNITION_BIT_POS);
+
+	if(gsm_info.b_roaming)
+		SetBit(&u32_status, (uint32_t)ROAMING_BIT_POS);
+	else
+		ResetBit(&u32_status, (uint32_t)ROAMING_BIT_POS);
+
+	if(rmc_info.status == NMEA_GPRMC_VALID)
+		SetBit(&u32_status, (uint32_t)GPS_BIT_POS);
+	else
+		ResetBit(&u32_status, (uint32_t)GPS_BIT_POS);
+
+
+/*
+
+
+	if(status_info.power_status == STATUS_BATTERY_POWERED)
+		SetBit(&u32_status, (uint32_t)POWER_STATUS_BIT);
+	else
+		ResetBit(&u32_status, (uint32_t)POWER_STATUS_BIT);*/
+
+	return u32_status;
+}
+/***************************************************************/
+uint8_t GetDigitalInputs()
+{
+	uint32_t u32_status = 0;
+
+	if(din_info[3].b_value)  /* digital input 1 is negative triggered */
+		ResetBit(&u32_status, (uint32_t)DIGITAL_INPUT1_BIT_POS);
+	else
+		SetBit(&u32_status, (uint32_t)DIGITAL_INPUT1_BIT_POS);
+
+	if(din_info[4].b_value)   /* digital input 2 is negative triggered */
+		ResetBit(&u32_status, (uint32_t)DIGITAL_INPUT2_BIT_POS);
+	else
+		SetBit(&u32_status, (uint32_t)DIGITAL_INPUT2_BIT_POS);
+
+	if(din_info[5].b_value)    /* digital input 3 is negative triggered */
+		ResetBit(&u32_status, (uint32_t)DIGITAL_INPUT3_BIT_POS);
+	else
+		SetBit(&u32_status, (uint32_t)DIGITAL_INPUT3_BIT_POS);
+
+	if(din_info[6].b_value)   /* digital input 4 is negative triggered */
+		ResetBit(&u32_status, (uint32_t)DIGITAL_INPUT4_BIT_POS);
+	else
+		SetBit(&u32_status, (uint32_t)DIGITAL_INPUT4_BIT_POS);
+
+	if(din_info[7].b_value)
+		SetBit(&u32_status, (uint32_t)DIGITAL_INPUT5_BIT_POS);
+	else
+		ResetBit(&u32_status, (uint32_t)DIGITAL_INPUT5_BIT_POS);
+
+	if(din_info[8].b_value)
+		SetBit(&u32_status, (uint32_t)DIGITAL_INPUT6_BIT_POS);
+	else
+		ResetBit(&u32_status, (uint32_t)DIGITAL_INPUT6_BIT_POS);
+
+	return WORD32_BYTE0(u32_status);
+}
+/***************************************************************/
+void Set_SuddenAccelerationEvent()
+{
+	event_info.event_sudden_acceleration = TRUE;
+}
+/***************************************************************/
+void StatusTask()
+{
+	ProcessSpeedLimitStatus();
+	if(Get_IgnitionStatus())
+		ProcessIdleStatus();
+	ProcessStopTimeStatus();
+	ProcessDigitalInputs();
+	ProcessLDRStatus();
+	ProcessBlockage();
+}
+/***************************************************************/
+void status_task_init()
+{
+	Init_DigitalInputs();
+	Clear_Events();
+	Init_IdleInfo();
+	Init_StopInfo();
+	Init_SpeedLimitInfo();
+}
+/***************************************************************/
+void ProcessLDRStatus(void)
+{
+	static COVER_STATES cover_state = COVER_CLOSED;
+
+	switch(cover_state)
+	{
+		case COVER_CLOSED:
+		if(Get_ADCValue(ADC_CH3) >= LDR_THRESHOLD_VALUE){
+			 event_info.event_cover_opened = TRUE;
+			 cover_state = COVER_NOT_CLOSED;
+		}
+		break;
+
+		case COVER_NOT_CLOSED:
+		if(Get_ADCValue(ADC_CH3) < LDR_THRESHOLD_VALUE){
+			cover_state = COVER_CLOSED;
+		}
+		break;
+	}
+}

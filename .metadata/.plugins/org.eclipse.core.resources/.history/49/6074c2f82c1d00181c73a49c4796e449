@@ -1,0 +1,786 @@
+#include <string.h>
+#include <stdlib.h>
+#include "bsp.h"
+
+#include "board.h"
+#include "timer.h"
+#include "event.h"
+#include "settings.h"
+#include "gsm.h"
+#include "gps.h"
+#include "adc.h"
+#include "can.h"
+#include "onewire.h"
+#include "MMA8652.h"
+#include "gSensor.h"
+#include "messages.h"
+#include "trace.h"
+#include "status.h"
+#include "rf_task.h"
+
+#include "utils.h"
+
+/* Function prototypes*/
+
+
+void Trio_PrepareTMessageBody(char *pBuffer);
+char * Add_GpsDateTimeInfo(char *buffer, RMC_MESSAGE_T *rmc_info);
+char * Add_GpsCoordinatesInfo(char *bufPtr, RMC_MESSAGE_T *rmc_info);
+char * Add_GpsSpeedInfo(char * bufPtr,  RMC_MESSAGE_T *rmc_info);
+char * Add_GpsCourseInfo(char * bufPtr,  RMC_MESSAGE_T *rmc_info);
+char * Add_GpsEwnsInfo(char * bufPtr,  RMC_MESSAGE_T *rmc_info);
+char get_ewns_code(char latitude, char longtitude);
+void add_rf_node_info_to_message(char *msgBuffer);
+
+extern LBS_INFO_T lbs_info;
+/***********************************************************/
+//TABLET_APP_EVENT_T tablet_msg_event_que[TABLET_APP_EVENT_QUE_SIZE];
+
+/****************************************************************************/
+//int32_t Trio_PreparePingMessage(char *pBuffer, const char *imei_no)
+int32_t Trio_PreparePingMessage(char *pBuffer)
+{
+	GSM_INFO_T gsm_info;
+
+	Get_GsmInfo(&gsm_info);
+
+	memset(pBuffer, 0, MAX_T_MESSAGE_SIZE);
+
+	strcat(pBuffer, P_MSG_START_STR);
+	strcat(pBuffer, T_MSG_EXT_SEPERATOR);
+	strcat(pBuffer, gsm_info.imei_no);
+	//strcat(pBuffer, imei_no);
+	strcat(pBuffer, T_MSG_END_STR);
+
+	return strlen(pBuffer);
+}
+/****************************************************************************/
+/** Fills the message buffer sent by pBuffer parameter and returns
+ *  the number of bytes in formatted message
+ *
+ *  c_buffer  [in out]     buffer for the message
+ *
+ *  return number of bytes in the buffer
+ ******************************************************************************/
+int32_t Trio_PrepareSTMessage(char *pBuffer, uint16_t bufSize)
+{
+	GSM_INFO_T gsm_info;
+	uint32_t resetStatusReg;
+	char buffer[120];
+	memset(pBuffer, 0, bufSize);
+	Get_GsmInfo(&gsm_info);
+	strcat((char *)pBuffer, "[ST;");
+	strcat((char *)pBuffer, gsm_info.imei_no);
+	strcat((char *)pBuffer, ";");
+	strcat((char *)pBuffer, VERSION);
+	strcat((char *)pBuffer, gsm_info.imsi_no);
+/*	strcat((char *)pBuffer,";");
+	strcat((char *)pBuffer, gsm_info.local_ip);*/
+
+	resetStatusReg =  Chip_SYSCTL_GetSystemRSTStatus();
+	resetStatusReg &= 0x0000000F;
+	sprintf(buffer,"\nReset status %X\n", resetStatusReg);
+	PRINT_K(buffer);
+	Chip_SYSCTL_ClearSystemRSTStatus(resetStatusReg);
+
+	switch(resetStatusReg)
+	{
+		case SYSCTL_RST_POR:
+		strcat(pBuffer, ";PORRST");
+		break;
+
+		case SYSCTL_RST_EXTRST:
+		strcat(pBuffer, ";EXTRST");
+		break;
+
+		case SYSCTL_RST_WDT:
+		strcat(pBuffer, ";WDTRST");
+		break;
+
+		case SYSCTL_RST_BOD:
+		strcat(pBuffer, ";BODRST");
+		break;
+
+		default:
+		strcat(pBuffer, ";RECONNECT");
+		break;
+	}
+	strcat((char *)pBuffer,T_MSG_END_STR);
+
+	return strlen((char *)pBuffer);
+}
+/*****************************************************************************/
+int32_t Trio_PrepareTMessage(char *msgBuffer, bool b_online)
+{
+	T_MSG_EVENT_T t_msg_event_t;
+	RF_NODE_T node;
+	char msg_field[MAX_T_MSG_FIELD_SIZE];
+	uint8_t i;
+	bool first_node = TRUE;
+//	char temp[4];
+//	char printBuf[250];
+
+	memset(msgBuffer, 0, MAX_T_MESSAGE_SIZE );
+	Trio_BeginTMessage(msgBuffer, b_online);
+
+	if(settings_check_lbs_activation_status()){
+		Trio_PrepareTMessageExtension(msgBuffer,LBS_INFO);
+	}
+	else{
+		Trio_PrepareTMessageBody(msgBuffer);
+		Trio_PrepareTMessageExtension(msgBuffer, GPS_INFO);
+	}
+
+	Trio_BeginTMessageExtension(msgBuffer);
+	Trio_PrepareTMessageExtension(msgBuffer, LOADCELL_INFO);
+
+	if(can_get_presence_status()){
+		Trio_AddTMessageExtensionSeperator(msgBuffer);
+		Trio_PrepareTMessageExtension(msgBuffer, CANBUS_DATA);
+	}
+	if(ds18b20_get_presence_status()){
+		Trio_AddTMessageExtensionSeperator(msgBuffer);
+		Trio_PrepareTMessageExtension(msgBuffer, TEMP_SENSOR_DATA);
+	}
+	if(rf_get_node_presence_status()){
+			for(i= 0; i< MAX_NUMBER_OF_NODES; i++){
+				 if(rf_get_node_in_ram(&node, i)){
+					 memset(msg_field, 0,  sizeof(msg_field));
+						 if(first_node){
+							 Trio_AddTMessageExtensionSeperator(msg_field);
+							 Trio_PrepareTMessageExtension(msg_field, RF_NODE_DATA);
+							 Trio_PrepareRfMessageExtension(msg_field, &node, false);
+							 first_node = FALSE;
+						 }
+						 else
+							 Trio_PrepareRfMessageExtension(msg_field, &node, true);
+
+						 if(!Trio_AddTMessageItem(msgBuffer, msg_field)){
+							 rf_clear_node_alarm(i);
+							 Trio_EndTMessage(msgBuffer);
+							 return strlen(msgBuffer);
+						 }
+				 }
+			}
+	}
+
+/*	if(rf_is_trailer_identified()){
+		Trio_AddTMessageExtensionSeperator(msgBuffer);
+		Trio_PrepareTMessageExtension(msgBuffer, TRAILER_IDENT);
+	}
+*/
+	Trio_AddTMessageExtensionSeperator(msgBuffer);
+	Trio_PrepareTMessageExtension(msgBuffer, ANALOG_INPUT_READING);
+
+	Trio_AddTMessageExtensionSeperator(msgBuffer);
+	Trio_PrepareTMessageExtension(msgBuffer, DIGITAL_INPUT_STATUS);
+
+	if(GetInterMessageIdleTime() > 0){
+		Trio_AddTMessageExtensionSeperator(msgBuffer);
+		Trio_PrepareTMessageExtension(msgBuffer, INTER_MESSAGE_IDLE_TIME);
+		ResetInterMessageIdleTime();
+	}
+/*	for(i =0 ; i < 150; i++)
+	{
+		strcat(msgBuffer, ",");
+		sprintf(temp,"%d", i);
+		strcat(msgBuffer, temp);
+	}
+*/
+	for(i =0; i < T_MSG_EVENT_QUE_SIZE; i++){
+		if(get_t_msg_event(&t_msg_event_t)){
+			if(strcmp(t_msg_event_t.msg_type, EVENT_T_MSG_TRIGGER) != 0){
+				memset(msg_field, 0,  sizeof(msg_field));
+				strcat(msg_field, T_MSG_EXT_SEPERATOR);
+				strcat(msg_field, t_msg_event_t.msg_type);
+					if(strlen(t_msg_event_t.param1) > 0){
+						strcat(msg_field, T_MSG_PARAM_BEGIN_CHAR);
+						strcat(msg_field, t_msg_event_t.param1);
+					}
+					if(strlen(t_msg_event_t.param2) > 0){
+						strcat(msg_field, T_MSG_PARAM_SEPER_CHAR);
+						strcat(msg_field, t_msg_event_t.param2);
+					}
+					 if(!Trio_AddTMessageItem(msgBuffer, msg_field)){
+						Trio_EndTMessage(msgBuffer);
+						return strlen(msgBuffer);
+					}
+			}
+		}
+	}
+
+//	if(event_info.event_idle_time_started) {
+	//	PRINT_K("\r\nAlarm: Idle time Started Alarm\r\n");
+	//	Trio_AddTMessageExtensionSeperator(msgBuffer);
+	//	Trio_PrepareTMessageExtension(msgBuffer, MAX_IDLE_TIME_EXCEEDED);
+//	}
+//	if(event_info.event_idle_time_finished) {
+	//	PRINT_K("\r\nAlarm: Idle time finished alarm\r\n");
+	//	Trio_AddTMessageExtensionSeperator(msgBuffer);
+	//	Trio_PrepareTMessageExtension(msgBuffer, MAX_IDLE_TIME_EXCEEDED);
+//	}
+//	if(event_info.event_stop_time_started) {
+	//	PRINT_K("\r\nAlarm: Stop time started\r\n");
+	//	Trio_AddTMessageExtensionSeperator(msgBuffer);
+	//    Trio_PrepareTMessageExtension(msgBuffer, MAX_STOP_TIME_EXCEEDED);
+//	}
+//	if(event_info.event_stop_time_finished) {
+	//	PRINT_K("\r\nAlarm: Stop time finished\r\n");
+	//	Trio_AddTMessageExtensionSeperator(msgBuffer);
+	//	Trio_PrepareTMessageExtension(msgBuffer, MAX_STOP_TIME_EXCEEDED);
+//	}
+//	if(event_info.event_speed_limit_violation_started) {
+	//	PRINT_K("\r\nAlarm: Speed limit violation started\r\n");
+	//	Trio_AddTMessageExtensionSeperator(msgBuffer);
+	//	Trio_PrepareTMessageExtension(msgBuffer, SPEED_LIMIT_VIOLATION);
+//	}
+//	if(event_info.event_speed_limit_violation_finished) {
+		//PRINT_K("\r\nAlarm: Speed limit violation finished\r\n");
+	//	Trio_AddTMessageExtensionSeperator(msgBuffer);
+	//	Trio_PrepareTMessageExtension(msgBuffer, SPEED_LIMIT_VIOLATION);
+//	}
+//	if(event_info.event_sim_card_removed){
+	//	PRINT_K("\r\nAlarm: SIM card removed\r\n");
+	//	Trio_AddTMessageExtensionSeperator(msgBuffer);
+	//	Trio_PrepareTMessageExtension(msgBuffer, SIM_REMOVED);
+//	}
+//	if(event_info.event_power_status_changed) {
+	//	PRINT_K("\r\nAlarm: Power status changed\r\n");
+	//	Trio_AddTMessageExtensionSeperator(msgBuffer);
+	//	Trio_PrepareTMessageExtension(msgBuffer, EXT_POWER_STATUS_CHANGE);
+//	}
+
+	/*if(get_gsensor_alarm_status()){
+		PRINT_K("\nALARM: Sudden Acceleration\n");
+		Trio_AddTMessageExtensionSeperator(msgBuffer);
+		Trio_PrepareTMessageExtension(msgBuffer, SUDDEN_ACCELERATION);
+	}
+*/
+
+	/* if main power supply is disconnected add power status to T message */
+	if(Get_ExtPowerStatus()){
+		Trio_AddTMessageExtensionSeperator(msgBuffer);
+		Trio_PrepareTMessageExtension(msgBuffer, BATTERY_LEVEL);
+	}
+	Trio_EndTMessage(msgBuffer);
+	/*sprintf(printBuf,"\n T message Lentgh : %d\n", strlen(msgBuffer));
+	PRINT_K(printBuf);*/
+	return strlen(msgBuffer);
+
+}/***********************************************************/
+bool Trio_AddTMessageItem(char *dest_buffer, char * msg_item)
+{
+	 if((strlen(dest_buffer) + strlen(msg_item)) > MAX_T_MESSAGE_SIZE)
+			return FALSE;
+	else{
+		strcat(dest_buffer,msg_item );
+		return TRUE;
+	}
+}
+/***********************************************************/
+void Trio_PrepareTMessageBody(char *msgBuffer)
+{
+	GSM_INFO_T gsm_info;
+	RMC_MESSAGE_T rmc_info;
+	GPS_POSITION_DATA_T position_info;
+	uint32_t u32_km = 0;
+	uint32_t u32_status;
+	float mileage;
+	char buffer2[10];
+//	char traceBuf[128];
+
+	Get_GsmInfo(&gsm_info);
+	gps_get_rmc_info(&rmc_info);
+	msgBuffer = strchr(msgBuffer, '\0');
+
+
+	msgBuffer = Add_GpsDateTimeInfo(msgBuffer, &rmc_info);
+	msgBuffer = Add_GpsCoordinatesInfo(msgBuffer, &rmc_info);
+	msgBuffer = Add_GpsSpeedInfo(msgBuffer, &rmc_info);
+	msgBuffer = Add_GpsCourseInfo(msgBuffer, &rmc_info);
+	msgBuffer = Add_GpsEwnsInfo(msgBuffer, &rmc_info);
+
+	/* insert 2 byte status information */
+     u32_status = GetStatusWord();
+    // u32_status = 0x26;
+     sprintf(buffer2, "%.2X",u32_status);
+     strcat(msgBuffer, buffer2);
+ /*    sprintf(buffer2, "%.1X", WORD32_BYTE0(u32_status));
+     strcat(msgBuffer, buffer2);*/
+   /* (*msgBuffer++) = WORD32_BYTE1(u32_status) + '0';
+    (*msgBuffer++) = WORD32_BYTE0(u32_status) + '0';*/
+
+	gps_get_position_info(&position_info);
+	mileage = position_info.distance / 1000;  /* convert to km */
+	u32_km = Get_FlashKmValue();
+
+	/*sprintf(traceBuf,"Total km: %f, %d km\n",mileage, u32_km);
+	PRINT_K(traceBuf);*/
+
+
+	sprintf(buffer2,"%.5X",((uint32_t)mileage + u32_km));
+	strcat(msgBuffer, buffer2);
+
+	 /* signal power*/
+	sprintf(buffer2, "%.2d",gsm_info.csq);
+	strcat(msgBuffer, buffer2);
+}
+/*************************************************************************************
+ * 030:A1
+   A1 => 1010 0001, dig. input 1 aktif, 2 pasif, 3 pasif, 4 pasif, 5 pasif, 6 aktif, 7 pasif, 8 aktif)
+    001:  Dijital giriş 1 aktif değerden pasif değere geçti  **
+    002:  Dijital giriş 1 pasif değerden aktif değere geçti  **
+    003:  Dijital giriş 2 aktif değerden pasif değere geçti  **
+    004:  Dijital giriş 2 pasif değerden aktif değere geçti  **
+    031 : Dijital giriş 3 aktif değerden pasif değere geçti  **
+    032 : Dijital giriş 3 pasif değerden aktif değere geçti  **
+    033 : Dijital giriş 4 aktif değerden pasif değere geçti  **
+    034 : Dijital giriş 4 pasif değerden aktif değere geçti  **
+    035 : Dijital giriş 5 aktif değerden pasif değere geçti  **
+    036 : Dijital giriş 5 pasif değerden aktif değere geçti  **
+    037 : Dijital giriş 6 aktif değerden pasif değere geçti  **
+    038 : Dijital giriş 6 pasif değerden aktif değere geçti  **
+    039 : Dijital giriş 7 aktif değerden pasif değere geçti
+    040 : Dijital giriş 7 pasif değerden aktif değere geçti
+    041 : Dijital giriş 8 aktif değerden pasif değere geçti
+    042 : Dijital giriş 8 pasif değerden aktif değere geçti
+    043 : Dijital giriş 9 aktif değerden pasif değere geçti
+    044 : Dijital giriş 9 pasif değerden aktif değere geçti
+    045 : Dijital giriş 10 aktif değerden pasif değere geçti
+    046 : Dijital giriş 10 pasif değerden aktif değere geçti
+*/
+void Trio_PrepareTMessageExtension2(char *buffer, T_MSG_EVENT_T *t_msg_event_t)
+{
+	/*strcat(buffer, t_msg_event_t->msg_code);
+	if(strlen(t_msg_event_t->param) > 0){
+		strcat(buffer, ":");
+		strcat(buffer, t_msg_event_t->param);
+	}*/
+/*	if(strlen(t_msg_event_t->param2) > 0){
+		strcat(buffer, ":");
+		strcat(buffer, t_msg_event_t->param2);
+	}
+	if(strlen(t_msg_event_t->param3) > 0){
+		strcat(buffer, ":");
+		strcat(buffer, t_msg_event_t->param3);
+	}
+	if(strlen(t_msg_event_t->param4) > 0){
+		strcat(buffer, ":");
+		strcat(buffer, t_msg_event_t->param4);
+	}*/
+}
+void Trio_PrepareTMessageExtension(char *u8_tMessage, MESSAGE_TYPE_T message_type)
+{
+	GSA_MESSAGE_T gsa_info;
+	ONEWIRE_PORT_T onewire_port1;
+	ONEWIRE_PORT_T onewire_port2;
+	LBS_INFO_T lbs_info;
+	int32_t weigth;
+	uint8_t digInputStatus;
+	char temp[512];
+	bool success = false;
+	//Get_StatusInfo(&status_info);
+//	Get_EventInfo(&event_info);
+
+	switch(message_type)
+	{
+		case LOADCELL_INFO:
+		sprintf(temp,"weight:%d", (int)hx711_calc_load(&weigth));
+		strcat(u8_tMessage, temp);
+		break;
+
+		case OFFLINE_DATA:
+		strcat(u8_tMessage, "019");
+		break;
+
+		case ANALOG_INPUT_READING:
+		strcat(u8_tMessage, "020:");
+		sprintf(temp,"%d",Get_ADCValue(ADC_CH0));
+		strcat(u8_tMessage, temp);
+		strcat(u8_tMessage, ",");
+		sprintf(temp,"%d",Get_ADCValue(ADC_CH1));
+		strcat(u8_tMessage, temp);
+		break;
+
+		case DIGITAL_INPUT_STATUS:
+		strcat(u8_tMessage, "030:");
+		digInputStatus = GetDigitalInputs();
+		sprintf(temp,"%.2X",digInputStatus);
+		strcat(u8_tMessage, temp);
+		break;
+
+		case TEMP_SENSOR_DATA:
+		Get_TempSensorValue(ONEWIRE_PORT_0, &onewire_port1); // (Get_TempSensor1Value() + 60) *10;//   (ds18b20_read(ONEWIRE_PORT_0) + 60) * 10;
+		Get_TempSensorValue(ONEWIRE_PORT_1, &onewire_port2);// (Get_TempSensor2Value() + 60) *10; //  (ds18b20_read(ONEWIRE_PORT_1) + 60) * 10;
+		strcat(u8_tMessage, "104:");
+		if(onewire_port1.present){
+			int tempInt = (onewire_port1.tempValue +60)*10;
+			sprintf(temp,"%.3X", tempInt);
+			strcat(u8_tMessage, temp);
+		}
+		if(onewire_port2.present){
+			int tempInt = (onewire_port2.tempValue +60)*10;
+			if(onewire_port1.present)
+				strcat(u8_tMessage, ",");
+			sprintf(temp,"%.3X", tempInt);
+			strcat(u8_tMessage, temp);
+		}
+		break;
+
+		case INTER_MESSAGE_IDLE_TIME:
+		sprintf(temp, "%X", (int)GetInterMessageIdleTime());
+		strcat(u8_tMessage, "00F:");
+		strcat(u8_tMessage, temp);
+		break;
+
+		case  GPS_INFO:
+		/* PARAM 1*/
+		gps_get_gsa_info(&gsa_info);
+
+		strcat(u8_tMessage, "-025:");
+		u8_tMessage = strchr(u8_tMessage, '\0');
+		(*u8_tMessage++) = gsa_info.mode2 + '0';
+		strcat(u8_tMessage, ",");
+
+		/* PARAM 2*/
+		sprintf(temp,"%d",gsa_info.pdop_int);
+		strcat(u8_tMessage, temp);
+		strcat(u8_tMessage, ".");
+		sprintf(temp,"%d",gsa_info.pdop_frac);
+		strcat(u8_tMessage, temp);
+		strcat(u8_tMessage, ",");
+
+		/* PARAM 3*/
+		sprintf(temp,"%d",gsa_info.hdop_int);
+		strcat(u8_tMessage, temp);
+		strcat(u8_tMessage, ".");
+		sprintf(temp,"%d",gsa_info.hdop_frac);
+		strcat(u8_tMessage, temp);
+		strcat(u8_tMessage, ",");
+
+		/* PARAM 4*/
+		sprintf(temp,"%d",gsa_info.vdop_int);
+		strcat(u8_tMessage, temp);
+		strcat(u8_tMessage, ".");
+		sprintf(temp,"%d",gsa_info.vdop_frac);
+		strcat(u8_tMessage, temp);
+		strcat(u8_tMessage, ",");
+
+		/* PARAM 5 */
+		sprintf(temp,"%d",gps_get_number_of_satellites());
+		strcat(u8_tMessage, temp);
+		break;
+
+		case CANBUS_DATA:
+		strcat(u8_tMessage, "008:");
+		Get_CanMessageString(temp, sizeof(temp));
+		strcat(u8_tMessage, temp);
+		break;
+
+		case LBS_INFO:
+		gsm_get_lbs_info(&lbs_info);
+	    strcat(u8_tMessage, "-NOGPS;102:");
+	    strcat(u8_tMessage, lbs_info.lat);
+	//    strcat(u8_tMessage, "dddd");
+	    strcat(u8_tMessage, ",");
+	//    strcat(u8_tMessage, "dddd");
+		strcat(u8_tMessage, lbs_info.lon);
+		success = true;
+		break;
+
+/*		case TRIP_INFO:
+		strcat(u8_tMessage, "026:");
+		strcat(u8_tMessage, Get_TripStartInfoBufferPtr());
+		strcat(u8_tMessage, ",");
+		sprintf(temp, "%d", (int)Get_TripDistance());
+		strcat(u8_tMessage, temp);
+		strcat(u8_tMessage, ",0,");
+		sprintf(temp,"%d", (int)Get_TripIdleTime());
+		strcat(u8_tMessage, temp);
+		break;
+*/
+		case BATTERY_LEVEL:
+		strcat(u8_tMessage, "00E:");
+		sprintf(temp, "%d",GetBatteryVoltage());
+		strcat(u8_tMessage, temp);
+		break;
+
+		case RF_NODE_DATA:
+		strcat(u8_tMessage, "106:");
+		break;
+/*
+		case RFID_CARD_READING:
+		strcat(u8_tMessage, "007:");
+		strcat(u8_tMessage, rfid_msg_buffer);
+		break;
+
+		case TRAILER_IDENT:
+		strcat(u8_tMessage, "108:");
+		rf_get_trailer_node_id(temp);
+		strcat(u8_tMessage, temp);
+		break;
+*/
+		return success;
+	}
+}
+/*****************************************************************/
+void Trio_PrepareRfMessageExtension(char *u8_tMessage, RF_NODE_T *node, bool add_comma)
+{
+	char buffer[16];
+
+	if(add_comma)
+		strcat(u8_tMessage, ",");
+
+	strcat(u8_tMessage,node->node_id);
+
+	sprintf(buffer,".%.3X.%.3X.",node->ds18b20_channel[0],node->ds18b20_channel[1]);
+	strcat(u8_tMessage, buffer);
+
+	if(node->door_status[0])
+		strcat(u8_tMessage, "1.");
+	else
+		strcat(u8_tMessage, "0.");
+
+	if(node->door_status[1])
+		strcat(u8_tMessage, "1.");
+	else
+		strcat(u8_tMessage, "0.");
+
+	sprintf(buffer,"%.4d.",node->bat_voltage);
+	strcat(u8_tMessage, buffer);
+
+	sprintf(buffer,"%.3d.",node->rssi);
+	strcat(u8_tMessage, buffer);
+
+	sprintf(buffer,"%.3d",node->alarm_status);
+	strcat(u8_tMessage, buffer);
+}
+/*****************************************************************/
+void Trio_BeginTMessageExtension(char *bufPtr)
+{
+	strcat(bufPtr, T_MSG_EXT_BEGIN_STR);
+	bufPtr++;
+}
+/*************************************************************/
+void Trio_AddTMessageExtensionSeperator(char *bufPtr)
+{
+	strcat(bufPtr, T_MSG_EXT_SEPERATOR);
+	bufPtr++;
+}
+/*****************************************************************/
+char *Add_GpsDateTimeInfo(char *bufPtr, RMC_MESSAGE_T *rmc_info)
+{
+	/* date*/
+	(*bufPtr++) = (rmc_info->day/10)   + '0';
+	(*bufPtr++) = (rmc_info->day%10)   + '0';
+	(*bufPtr++) = (rmc_info->month/10) + '0';
+	(*bufPtr++) = (rmc_info->month%10) + '0';
+	(*bufPtr++) = (rmc_info->year/10)  + '0';
+	(*bufPtr++) = (rmc_info->year%10)  + '0';
+
+	/* time */
+	(*bufPtr++) =  (rmc_info->utc_hour/10)   + '0';
+	(*bufPtr++) =  (rmc_info->utc_hour%10)   + '0';
+	(*bufPtr++) =  (rmc_info->utc_minute/10) + '0';
+	(*bufPtr++) =  (rmc_info->utc_minute%10) + '0';
+	(*bufPtr++) =  (rmc_info->utc_second/10) + '0';
+	(*bufPtr++) =  (rmc_info->utc_second%10) + '0';
+
+	return bufPtr;
+}
+/*********************************************************************************/
+char * Add_GpsCoordinatesInfo(char *bufPtr, RMC_MESSAGE_T *rmc_info)
+{
+	/* latitude */
+	(*bufPtr++) = (rmc_info->coords.latitude.degrees /10)   + '0';
+	(*bufPtr++) = (rmc_info->coords.latitude.degrees %10)   + '0';
+	(*bufPtr++) = (rmc_info->coords.latitude.minutes /10)   + '0';
+	(*bufPtr++) = (rmc_info->coords.latitude.minutes %10)   + '0';
+
+	(*bufPtr++) =  (rmc_info->coords.latitude.minutes_frac /1000)       + '0';
+	(*bufPtr++) =  (rmc_info->coords.latitude.minutes_frac %1000 /100)  + '0';
+	(*bufPtr++) =  (rmc_info->coords.latitude.minutes_frac %100)/10     + '0';
+	(*bufPtr++) =  (rmc_info->coords.latitude.minutes_frac %10)         + '0';
+
+	/* longitude */
+	(*bufPtr++) = (rmc_info->coords.longitude.degrees /100)      + '0';
+	(*bufPtr++) = (rmc_info->coords.longitude.degrees %100) /10  + '0';
+	(*bufPtr++) = (rmc_info->coords.longitude.degrees %10)       + '0';
+	(*bufPtr++) = (rmc_info->coords.longitude.minutes /10)       + '0';
+	(*bufPtr++) = (rmc_info->coords.longitude.minutes %10)       + '0';
+
+	(*bufPtr++) = (rmc_info->coords.longitude.minutes_frac /1000)       + '0';
+	(*bufPtr++) = (rmc_info->coords.longitude.minutes_frac %1000) /100  + '0';
+	(*bufPtr++) = (rmc_info->coords.longitude.minutes_frac %100)/10     + '0';
+	(*bufPtr++) = (rmc_info->coords.longitude.minutes_frac %10)         + '0';
+
+	return bufPtr;
+}
+/*************************************************************************************/
+char *Add_GpsSpeedInfo(char *bufPtr,  RMC_MESSAGE_T *rmc_info)
+{
+	uint16_t u16_speedKm;
+	char buffer[16];
+
+	memset(buffer, 0, sizeof(buffer));
+
+	u16_speedKm = rmc_info->speed*1852/1000;
+
+	if(u16_speedKm >  MAX_SPEED_IN_T_MSG)
+		u16_speedKm = MAX_SPEED_IN_T_MSG;
+
+	sprintf(buffer,"%.2X",u16_speedKm);
+	strcat(bufPtr, buffer);
+	/*Hex2Str(buffer, u32_speedKm);
+	strcat(bufPtr, &buffer[6]);*/
+	return bufPtr;
+}
+/*************************************************************************************/
+char *Add_GpsCourseInfo(char *bufPtr,  RMC_MESSAGE_T *rmc_info)
+{
+	char buffer[16];
+
+	memset(buffer, 0, sizeof(buffer));
+
+	if(rmc_info->course >  MAX_COURSE_IN_T_MSG)
+		rmc_info->course = MAX_COURSE_IN_T_MSG;
+
+	sprintf(buffer,"%.3X",rmc_info->course);
+	strcat(bufPtr, buffer);
+
+	/*Hex2Str(buffer,rmc_info->course);
+	strcat(bufPtr, &buffer[5]);*/
+
+	bufPtr = strchr(bufPtr, '\0');
+
+	return bufPtr;
+}
+/***********************************************************************************/
+void Trio_StartTripInfoMessage(char *bufPtr)
+{
+	RMC_MESSAGE_T rmc_info;
+	gps_get_rmc_info(&rmc_info);
+
+	bufPtr = Add_GpsDateTimeInfo(bufPtr, &rmc_info);
+	bufPtr = Add_GpsCoordinatesInfo(bufPtr, &rmc_info);
+	bufPtr = Add_GpsSpeedInfo(bufPtr, &rmc_info);
+	bufPtr = Add_GpsCourseInfo(bufPtr, &rmc_info);
+	bufPtr = Add_GpsEwnsInfo(bufPtr, &rmc_info);
+}
+/*********************************************************************/
+char * Add_GpsEwnsInfo(char *bufPtr,  RMC_MESSAGE_T *rmc_info)
+{
+	(*bufPtr++) = get_ewns_code(rmc_info->coords.latitude.indicator,
+							    rmc_info->coords.longitude.indicator);
+	return bufPtr;
+}
+/*********************************************************************/
+char get_ewns_code(char latitude, char longtitude)
+{
+	if(latitude == 'N' && longtitude == 'E') return '0';
+	else if(latitude == 'N' && longtitude == 'W') return '1';
+	else if(latitude == 'S' && longtitude == 'E') return '2';
+	else if(latitude == 'S' && longtitude == 'W') return '3';
+	else return '4';   /* return invalid direction code */
+}
+/****************************************************************************/
+void Trio_BeginTMessage(char *msgBuffer, bool b_online)
+{
+	GSM_INFO_T gsm_info;
+	memset(msgBuffer, 0, MAX_T_MESSAGE_SIZE);
+	strcat(msgBuffer, T_MSG_START_STR);
+	Get_GsmInfo(&gsm_info);
+	if(b_online)
+		strcat(msgBuffer, gsm_info.imei_no);
+}
+/*****************************************************************************/
+void Trio_EndTMessage(char *msgBuffer)
+{
+	strcat(msgBuffer,T_MSG_END_STR);
+}
+/*****************************************************************************/
+int16_t prepare_t_message(char *msgBuffer, EXT_MESSAGE_T extension_type, char *message , bool b_online)
+{
+	RF_NODE_T node;
+	char msg_field[MAX_T_MSG_FIELD_SIZE];
+	uint8_t i;
+	bool first_node = TRUE;
+//	char temp[4];
+//	char printBuf[250];
+
+		Trio_BeginTMessage(msgBuffer,  b_online);
+		Trio_PrepareTMessageBody(msgBuffer);
+
+		Trio_BeginTMessageExtension(msgBuffer);
+		Trio_PrepareTMessageExtension(msgBuffer, GPS_INFO);
+
+		if(can_get_presence_status()){
+			Trio_AddTMessageExtensionSeperator(msgBuffer);
+			Trio_PrepareTMessageExtension(msgBuffer, CANBUS_DATA);
+		}
+		if(ds18b20_get_presence_status()){
+			Trio_AddTMessageExtensionSeperator(msgBuffer);
+			Trio_PrepareTMessageExtension(msgBuffer, TEMP_SENSOR_DATA);
+		}
+		if(rf_get_node_presence_status()){
+				for(i= 0; i< MAX_NUMBER_OF_NODES; i++){
+					 if(rf_get_node_in_ram(&node, i)){
+						 memset(msg_field, 0,  sizeof(msg_field));
+							 if(first_node){
+								 Trio_AddTMessageExtensionSeperator(msg_field);
+								 Trio_PrepareTMessageExtension(msg_field, RF_NODE_DATA);
+								 Trio_PrepareRfMessageExtension(msg_field, &node, false);
+								 first_node = FALSE;
+							 }
+							 else
+								 Trio_PrepareRfMessageExtension(msg_field, &node, true);
+
+							 if(!Trio_AddTMessageItem(msgBuffer, msg_field)){
+								 rf_clear_node_alarm(i);
+								 Trio_EndTMessage(msgBuffer);
+								 return strlen(msgBuffer);
+							 }
+					 }
+				}
+		}
+
+		Trio_AddTMessageExtensionSeperator(msgBuffer);
+		Trio_PrepareTMessageExtension(msgBuffer, ANALOG_INPUT_READING);
+
+		Trio_AddTMessageExtensionSeperator(msgBuffer);
+		Trio_PrepareTMessageExtension(msgBuffer, DIGITAL_INPUT_STATUS);
+
+		if(GetInterMessageIdleTime() > 0){
+			Trio_AddTMessageExtensionSeperator(msgBuffer);
+			Trio_PrepareTMessageExtension(msgBuffer, INTER_MESSAGE_IDLE_TIME);
+			ResetInterMessageIdleTime();
+		}
+
+		/* if main power supply is disconnected add power status to T message */
+		if(Get_ExtPowerStatus()){
+			Trio_AddTMessageExtensionSeperator(msgBuffer);
+			Trio_PrepareTMessageExtension(msgBuffer, BATTERY_LEVEL);
+		}
+		switch(extension_type){
+			case EXT_TYPE_LORA_MESSAGE:
+				Trio_AddTMessageExtensionSeperator(msgBuffer);
+				Trio_PrepareTMessageExtensionVer2(msgBuffer, message, EXT_TYPE_LORA_MESSAGE);
+				break;
+		}
+		Trio_EndTMessage(msgBuffer);
+
+		return strlen(msgBuffer);
+}
+/************************************************************************************/
+void Trio_PrepareTMessageExtensionVer2(char *u8_tMessage, char *message, EXT_MESSAGE_T message_type)
+{
+	switch(message_type)
+	{
+		case EXT_TYPE_LORA_MESSAGE:
+			strcat(u8_tMessage, EVENT_LORA_MESSAGE);
+			strcat(u8_tMessage, ":");
+			strcat(u8_tMessage, message);
+			break;
+
+	}
+}

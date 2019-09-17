@@ -1,0 +1,81 @@
+#ifndef LE50_H_
+#define LE50_H_
+
+
+#define     LE50_PORT               LPC_UART3
+#define     LE50_BAUD_RATE          19200
+
+#define     LE50_TX_PORT_NUM         4
+#define     LE50_RX_PORT_NUM         4
+#define     LE50_TX_PIN_NUM          28
+#define     LE50_RX_PIN_NUM          29
+
+#define     LE50_DETECT_RETRY_COUNT  3
+
+static const char str_le50_OK[]   =  "OK";
+static const char aes_key[]       =  "1234567890123456";
+static const char le50_cmd_set_at_mode[]          = "+++";
+static const char le50_cmd_set_online_mode[]      = "ATO\r";
+static const char le50_cmd_set_operating_mode[]   = "ATS220=";
+static const char le50_cmd_set_lowpower_mode[]    = "ATS240=";
+static const char le50_cmd_set_network_opt[]      = "ATS255=";
+static const char le50_cmd_set_aes_key[]          = "ATS280=";
+static const char le50_cmd_get_serial_number[]    = "ATS192?\r";
+
+typedef enum LE50_OPERATING_MODE{
+	LE50_MODE_TRANSPARENT = 1,                        /* default */
+	LE50_MODE_ADDRESSED_SECURE = 9,
+	LE50_SMART_REPEATER_COORDINATOR = 10,             /* only for LE70-868 and LE51-868S */
+	LE50_SMART_REPEATER_NODE = 11                     /* only for LE70-868 and LE51-868S */
+}LE50_OPERATING_MODE_T;
+
+typedef enum LE50_LOWPOWER_MODE
+{
+	LE50_LOWPOWER_OPTS_HW_PIN,                        /* Stand-by activated by hardware pin */
+	LE50_LOWPOWER_OPTS_SERIAL,                        /* Stand-by activated by serial command*/
+	LE50_LOWPOWER_OPTS_WOR,                           /* wake on radio */
+}LE50_LOWPOWER_MODE_T;
+
+typedef enum LE50_NETWORK_OPTS{
+	LE50_NETWORK_OPTS_HEADER,
+	LE50_NETWORK_OPTS_CR,
+	LE50_NETWORK_OPTS_NUMERIC_HEADER,
+	LE50_NETWORK_OPTS_AES,
+	LE50_NETWORK_OPTS_STATUS_ANSWER,
+	LE50_NETWORK_OPTS_2_BYTE_HEADER,
+	LE50_NETWORK_OPTS_RADIO_ACK,
+	LE50_NETWORK_OPTS_RSSI
+}LE50_NETWORK_OPTS_T;
+
+#define LE50_OPTS_HEADER                   (1 << LE50_NETWORK_OPTS_HEADER)
+#define LE50_OPTS_NO_HEADER                (0 << LE50_NETWORK_OPTS_HEADER)
+#define LE50_OPTS_CR                       (1 << LE50_NETWORK_OPTS_CR)
+#define LE50_OPTS_NUM_HEADER               (1 << LE50_NETWORK_OPTS_NUMERIC_HEADER)
+#define LE50_OPTS_AES                      (1 << LE50_NETWORK_OPTS_AES)
+#define LE50_OPTS_STATUS_ANSWER            (1 << LE50_NETWORK_OPTS_STATUS_ANSWER)
+#define LE50_OPTS_2_BYTE_HEADER            (1 << LE50_NETWORK_OPTS_2_BYTE_HEADER)
+#define LE50_OPTS_RADIO_ACK                (1 << LE50_NETWORK_OPTS_RADIO_ACK)
+#define LE50_OPTS_RADIO_RSSI               (1 << LE50_NETWORK_OPTS_RSSI)
+
+#define LE50_OPTS_LP_HW_PIN                (1 << LE50_LOWPOWER_OPTS_HW_PIN)
+#define LE_OPTS_LP_SERIAL                  (1 << LE50_LOWPOWER_OPTS_SERIAL)
+#define LE_OPTS_LP_WOR                     (1 << LE50_LOWPOWER_OPTS_WOR)
+
+#define LE50_AT_COMMAND_RESP_TIMEOUT         50
+#define LE50_868_IDLE_TIMEOUT                10
+
+
+
+
+
+bool le50_init();
+bool le50_activate_online_mode();
+bool le50_activate_at_mode();
+bool le50_set_aes_key(const char *key);
+bool le50_set_network_options(uint8_t options);
+bool le50_set_operating_mode(LE50_OPERATING_MODE_T mode);
+bool le50_set_low_power_mode(LE50_LOWPOWER_MODE_T mode);
+bool le50_get_serial_number(char *serial_number);
+uint16_t le50_get_response(char *buffer, uint16_t buffer_size, uint32_t timeout);
+
+#endif /* LE_H_ */

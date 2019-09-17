@@ -1,0 +1,349 @@
+/*
+ * scale_task.c
+ *
+ *  Created on: 27 Şub 2018
+ *      Author: mkurus
+ */
+
+#include "chip.h"
+#include "board.h"
+#include "bsp.h"
+#include "timer.h"
+#include "settings.h"
+#include "status.h"
+#include "ProcessTask.h"
+#include "trace.h"
+#include "utils.h"
+#include <ctype.h>
+#include <string.h>
+#include "hx711.h"
+#include <stdlib.h>
+#include "din_task.h"
+#include "scale_task.h"
+#include "timer_task.h"
+#include "status.h"
+
+
+bool GetEvent_ScaleTask(SCALE_TASK_EVENT_T *tEvent);
+void write_scale_event_callback();
+void trigger_scale_measurement();
+int32_t filterScaleValues();
+ScaleTask ScaleTask_t;
+SCALE_TASK_SIGNAL_T sig;
+HX711_CALIB_T calib_coeff;
+SCALE_INFO_T scale_info_t;
+static int8_t scaleDetectionTimerId = -1;
+static uint8_t sampleCount = 0;
+static float scaleValArray[SCALE_CALIBRATION_SAMPLE_COUNT];
+
+const HX711_CONFIG_T hx711_config_t ={  DIN1_PORT_NUM, DOUT1_GPIO_PORT_NUM, HX711_DAT ,HX711_CLK };
+/**
+ *
+ */
+bool GetEvent_ScaleTask(SCALE_TASK_EVENT_T *tEventContainer)
+{
+	if(ScaleTask_t.tEventQueue.u8_count){
+		tEventContainer->sig = ScaleTask_t.tEventQueue.tEventBuffer[ScaleTask_t.tEventQueue.u8_readPtr].sig;
+
+		/* decrement event counter*/
+		ScaleTask_t.tEventQueue.u8_count--;
+		/* check if reached end of queue */
+		if (ScaleTask_t.tEventQueue.u8_readPtr >= SCALE_TASK_EVENT_QUE_SIZE - 1)
+			ScaleTask_t.tEventQueue.u8_readPtr = 0;
+		else
+			ScaleTask_t.tEventQueue.u8_readPtr++;
+
+		return true;
+	}
+	else
+		return false;
+}
+/**
+ *
+ */
+void PutEvent_ScaleTask(SCALE_TASK_EVENT_T *tEventContainer)
+{
+	if(ScaleTask_t.tEventQueue.u8_count < SCALE_TASK_EVENT_QUE_SIZE){
+		ScaleTask_t.tEventQueue.u8_count++;
+
+		ScaleTask_t.tEventQueue.tEventBuffer[ScaleTask_t.tEventQueue.u8_wrtPtr].sig = tEventContainer->sig;
+
+		if(ScaleTask_t.tEventQueue.u8_wrtPtr >= SCALE_TASK_EVENT_QUE_SIZE - 1)
+			ScaleTask_t.tEventQueue.u8_wrtPtr = 0;
+		else
+			ScaleTask_t.tEventQueue.u8_wrtPtr++;
+	}
+	else  /* critical error  */{
+		PRINT_K("\nCannot write event to ScaleTask\n");
+		return;
+	}
+
+}
+/**
+ *
+ */
+void scale_task_init()
+{
+    /* initialize task variables */
+/*	ScaleTask_t.tEventQueue.u8_count = 0;
+	ScaleTask_t.tEventQueue.u8_readPtr = 0;
+	ScaleTask_t.tEventQueue.u8_wrtPtr = 0;
+	ScaleTask_t.tTaskState = SCALE_CALIBRATED_STATE;*/
+
+	/* initialize measurement data */
+/*	scale_info_t.isConnected = false;
+	scale_info_t.scaleVal = 0;
+
+	trigger_scale_measurement();*/
+}
+/**
+ *
+ */
+void trigger_scale_measurement()
+{
+	SCALE_TASK_EVENT_T event;
+	if(getDin1Status())
+		event.sig = SIGNAL_SCALE_INACTIVATED;
+	else
+		event.sig = SIGNAL_SCALE_ACTIVATED;
+
+	PutEvent_ScaleTask(&event);
+}
+/**
+ *
+ */
+void task_scale()
+{
+	SCALE_TASK_EVENT_T event;
+	static float avg = 0;
+	int32_t scaleVal, filteredValue = 0;
+	char printBuf[64];
+
+		if(GetEvent_ScaleTask(&event)){
+			switch(ScaleTask_t.tTaskState){
+
+			case SCALE_CALIBRATED_STATE:
+				switch(event.sig){
+					case SIGNAL_SCALE_INACTIVATED:
+						hx711_set_clk(false);
+						break;
+
+					case SIGNAL_SCALE_ACTIVATED:
+						hx711_calc_load(&scaleVal);
+						if(sampleCount < 10){
+							scale_info_t.scaleVal = scaleVal;
+							scaleValArray[sampleCount++] = scaleVal;
+						}
+						else{
+							filteredValue = filterScaleValues();
+							scale_info_t.scaleVal = filteredValue;
+							scaleValArray[9] = scaleVal;
+						}
+						scale_info_t.isConnected = true;
+						hx711_set_clk(true);
+					//	Timer_Unschedule(&scaleDetectionTimerId);
+					//	sig = SIGNAL_SCALE_DISCONNECT_TIMEOUT;
+					//	scaleDetectionTimerId = Timer_Schedule(TIMER_TYPE_ONE_SHOT, SCALE_DISCONNECT_TIMEOUT, write_scale_event_callback, (void *)&sig);
+						sprintf(printBuf, "\nScale value %d\n", (int)scale_info_t.scaleVal);
+						PRINT_K(printBuf);
+						break;
+
+					case SIGNAL_SCALE_DISCONNECT_TIMEOUT:
+						PRINT_K("\nScale Disconnected\n");
+						scale_info_t.isConnected = false;
+						break;
+
+					case SIGNAL_SCALE_START_CALIBRATION:
+						avg = 0;
+						sampleCount = 0;
+						trigger_scale_measurement();
+						ScaleTask_t.tTaskState = SCALE_CALIBRATE_C_STATE;
+						break;
+
+					default:
+						break;
+				}
+				break;
+
+				/* find c  */
+			case SCALE_CALIBRATE_C_STATE:
+				switch(event.sig){
+					case SIGNAL_SCALE_INACTIVATED:
+						if(sampleCount == SCALE_CALIBRATION_SAMPLE_COUNT){
+							calib_coeff.coeff_c  = median_filter(scaleValArray, SCALE_CALIBRATION_SAMPLE_COUNT);
+							sprintf(printBuf,"\nCoefficent c: %d\n", (int)(calib_coeff.coeff_c) );
+							PRINT_K(printBuf);
+							PRINT_K("\nPut 1000g weight on scale\n");
+						}
+						else
+							hx711_set_clk(false);
+						break;
+
+					case SIGNAL_SCALE_ACTIVATED:
+						hx711_read_adc(&scaleVal);
+						scaleValArray[sampleCount] = scaleVal;
+						hx711_set_clk(true);
+						sampleCount++;
+						sprintf(printBuf, "\nScale value %d\n", (int)scaleVal);
+						PRINT_K(printBuf);
+						break;
+
+					case SIGNAL_SCALE_START_CALIBRATION:
+						avg = 0;
+						sampleCount = 0;
+						trigger_scale_measurement();
+						break;
+
+					case SIGNAL_SCALE_CALIBRATE_M:
+						avg = 0;
+						sampleCount = 0;
+						trigger_scale_measurement();
+						ScaleTask_t.tTaskState = SCALE_CALIBRATE_M_STATE;
+						break;
+
+					default:
+						break;
+				}
+				break;
+				/* find m */
+				case SCALE_CALIBRATE_M_STATE:
+					switch(event.sig){
+
+						case SIGNAL_SCALE_INACTIVATED:
+							if(sampleCount == SCALE_CALIBRATION_SAMPLE_COUNT){
+								avg = median_filter(scaleValArray, SCALE_CALIBRATION_SAMPLE_COUNT);
+								calib_coeff.coeff_m = (avg - calib_coeff.coeff_c) / SCALE_REFERENCE_WEIGHT;
+								sprintf(printBuf,"\nCoefficent m: %f\n", calib_coeff.coeff_m );
+								PRINT_K(printBuf);
+							    update_calibration_settings(&calib_coeff);
+							    trigger_scale_measurement();
+								ScaleTask_t.tTaskState = SCALE_CALIBRATED_STATE;
+							}
+							else
+								hx711_set_clk(false);
+							break;
+
+						case SIGNAL_SCALE_ACTIVATED:
+							hx711_read_adc(&scaleVal);
+							scaleValArray[sampleCount] = scaleVal;
+							hx711_set_clk(true);
+							sampleCount++;
+							sprintf(printBuf, "\nScale value %d\n", (int)scaleVal);
+							PRINT_K(printBuf);
+							break;
+
+						case SIGNAL_SCALE_START_CALIBRATION:
+							sampleCount = 0;
+							trigger_scale_measurement();
+							ScaleTask_t.tTaskState = SCALE_CALIBRATE_C_STATE;
+							break;
+
+						default:
+							break;
+						}
+					break;
+			}
+		}
+
+}
+/**
+ *
+ */
+void write_scale_event_callback(void *param)
+{
+	SCALE_TASK_EVENT_T event;
+	memset(&event, 0, sizeof(SCALE_TASK_EVENT_T));
+	event.sig = *((SCALE_TASK_SIGNAL_T *)param);
+	PutEvent_ScaleTask(&event);
+}
+/**
+ * loads calibration coefficents from flash
+ */
+void hx711_init()
+{
+	settings_get_calibration_coefficents(&calib_coeff);
+
+}
+/**
+ * read raw ADC value
+ */
+bool hx711_read_adc(int32_t *result)
+{
+    uint32_t ul_count;
+	uint32_t i;
+	ul_count = 0;
+	/*
+	 * When output data is not ready for retrieval,
+	 * digital output pin of HX711 is high.When DOUT goes
+	 * to low, it indicates data is ready for retrieval.
+	 * We have inverted input on digital input 1.
+	 */
+	for(i = 0; i < CLK_PULSE_COUNT; i++) {
+		hx711_set_clk(true);
+		DelayUs(HX711_CLK_PLS_LENGTH*5);
+		hx711_set_clk(false);
+		ul_count = ul_count << 1;
+		if(hx711_get_data())
+			ul_count++;
+		DelayUs(HX711_CLK_PLS_LENGTH*5);
+
+	}
+	hx711_set_clk(true);
+	DelayUs(HX711_CLK_PLS_LENGTH*5);
+	hx711_set_clk(false);
+	DelayUs(HX711_CLK_PLS_LENGTH*5);
+
+	*result = ((int32_t)(ul_count<<8))>>8;
+
+	return true;
+}
+/**
+ * calculate calibrated weight value
+ */
+bool hx711_calc_load(int32_t *result)
+{
+	int32_t val;
+
+	if(hx711_read_adc(&val)){
+		*result= (val - calib_coeff.coeff_c) / calib_coeff.coeff_m;
+		return true;
+	}
+	return false;
+}
+/**
+ *  read hx711 data bit
+ */
+bool hx711_get_data()
+{
+	return (!Chip_GPIO_GetPinState(LPC_GPIO, hx711_config_t.u8_dataPort, hx711_config_t.u8_dataPin) );
+}
+/**
+ * set clock pulse state
+ */
+void hx711_set_clk(bool status)
+{
+	Chip_GPIO_SetPinState(LPC_GPIO,hx711_config_t.u8_clkPort , hx711_config_t.u8_clkPin, !status);
+}
+/**
+ *
+ */
+void get_scale_info(SCALE_INFO_T *scaleContainer)
+{
+	memcpy(scaleContainer, &scale_info_t, sizeof(SCALE_INFO_T));
+}
+/**
+ *
+ */
+int32_t filterScaleValues()
+{
+	int i = 0;
+	double total = 0;
+
+	for(i = 0; i < 10; i++)
+		total += scaleValArray[i];
+
+	for(i = 0; i < 9; i++)
+		scaleValArray[i] = scaleValArray[i + 1];
+
+    return total/10;
+}

@@ -1,0 +1,42 @@
+/*
+ * ProcessTask.c
+ *
+ *  Created on: 29 Şub 2016
+ *      Author: admin
+ */
+#include "chip.h"
+#include "board.h"
+#include "bsp.h"
+#include "settings.h"
+#include "trace.h"
+#include "timer.h"
+#include "ProcessTask.h"
+#include "MMA8652.h"
+#include "gsm.h"
+#include "adc.h"
+
+#define HEARTBEAT_INTERVAL         (1  * SECOND)
+
+TIMER_INFO_T HEARTBEAT_TIMER;
+
+void Process_Task(void)
+{
+	TIMER_INFO_T HEARTBEAT_TIMER;
+	uint8_t ctrl_reg1;
+	char printBuf[128];
+	char data[] = {0x40};
+	Set_Timer(&HEARTBEAT_TIMER, HEARTBEAT_INTERVAL);
+	MMA8652_ACCEL_VALUES_T mma8652_accel_values;
+//	MMA865x_Write(F_SETUP, data, 1);
+//	MMA865x_Active();
+	while(1){
+		GsmTask();
+		CAN_Task();
+		GpsTask();
+		StatusTask();
+		OfflineTask();
+		DebugPortTask();
+
+	}
+
+}
